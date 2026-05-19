@@ -1,2 +1,5 @@
 # Independently managed nested repository
 /VA/
+/build/
+/dist/
+/doc/

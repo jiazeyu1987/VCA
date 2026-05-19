@@ -1,0 +1,48 @@
+{
+  "GPU": true,
+  "width_x": 2,
+  "height_y": 4,
+  "binary_threshold": 10,
+  "drawcontour": true,
+  "if_align": false,
+
+  "_comment_diff_label": "Text overlay style for differ/diff images (e.g. FEM result label).",
+  "diff_label": { "pil_font_size": 18, "pil_spacing": 2, "cv_scale": 0.34, "cv_thickness": 1, "cv_line_step": 16 },
+
+  "_comment_roi1_capture": "Optional: capture a smaller ROI1 region instead of full screen to reduce screenshot/convert overhead.",
+  "roi1_capture": {
+    "enabled": false,
+    "x1": 1280,
+    "y1": 80,
+    "x2": 1920,
+    "y2": 980
+  },
+
+  "_comment_offline_screenshot_test": "Legacy desktop-screenshot OFFLINE path is test-only. Keep disabled in normal algorithm runs. Enable only when you intentionally want OFFLINE screenshot capture for testing.",
+  "offline_screenshot_test": {
+    "enabled": false
+  },
+
+  "_comment_offline_peak": "Offline peak detection: treat gray>=threshold as high; first continuous high interval starts the peak; the first drop below threshold marks the start of the descending interval (NOT peak end). Peak end is when abs(gray - before_gray) <= end_diff_threshold during the descending interval. after=peak end + after_delay_frames. before=the first screenshot of the thread. When stop is triggered (same point_id OFFLINE), if after not captured then use a stop-time screenshot as after.",
+  "offline_peak": {
+    "enabled": true,
+    "threshold": 25.0,
+    "after_delay_frames": 2,
+    "end_diff_threshold": 7.0
+  },
+
+  "_comment_peak_detect": "SimpleFEM-style focus+ROI2/ROI3: detect green-line intersection (anchor) on BEFORE once; compute ROI2/ROI3 by extension_params; reuse same ROI2 on AFTER; compute roi2_diff=(after_mean-before_mean) and compare with difference_threshold (>= green else red). If focus fails, reuse last successful anchor/ROI rects.",
+  "peak_detect": {
+    "enabled": false,
+    "difference_threshold": 0.5,
+    "roi2_extension_params": { "left": 40, "right": 40, "top": 50, "bottom": 30 },
+    "roi3_extension_params": { "left": 30, "right": 30, "top": 50, "bottom": 100 },
+    "_comment_roi3_override": "When ROI2 result is red, ROI3 metrics can override to green. Frame selection: use_peak_max=true will pick the buffered frame (offline_tmp_frames) with max ROI3 G1; otherwise uses the AFTER frame.",
+    "roi3_g1_g2_override": { "enabled": true, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": true },
+    "roi3_column_diff_override": { "enabled": true, "g1_threshold": 99.0, "threshold": 15.0, "use_peak_max": true }
+  },
+  "peak_debug_log": { "enabled": false }
+  ,
+  "_comment_offline_tmp_frames": "When enabled, buffer frames from first OFFLINE signal and flush (save images + append JSONL) only when the second OFFLINE signal arrives. Per-frame JSONL contains: filename, roi1_mean, roi2_mean, roi3_mean. Additional event lines are appended with a different schema: {event:'before_saved'/'after_saved', filename,...}.",
+  "offline_tmp_frames": { "enabled": false, "dir": "D:/software_data/tmp", "max_buffer_frames": 2500 }
+}
