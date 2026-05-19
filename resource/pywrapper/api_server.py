@@ -285,6 +285,49 @@ def import_mobile_comm():
     return PyMobileComm
 
 
+def build_provider_focus_point(focus_x, focus_y) -> Optional[str]:
+    if focus_x is None or focus_y is None:
+        return None
+    return f"PointF({focus_x}, {focus_y})"
+
+
+def normalize_provider_payload(raw_data: dict) -> dict:
+    if raw_data is None:
+        raise ValueError("RequestContentProvider callback returned None")
+    if not isinstance(raw_data, dict):
+        raise TypeError(f"RequestContentProvider callback must decode to dict, got {type(raw_data).__name__}")
+
+    normalized = dict(raw_data)
+    if normalized.get("focus_point") in (None, ""):
+        focus_point = build_provider_focus_point(normalized.get("focus_x"), normalized.get("focus_y"))
+        if focus_point is not None:
+            normalized["focus_point"] = focus_point
+    return normalized
+
+
+def parse_provider_callback_payload(raw_payload) -> dict:
+    if raw_payload is None:
+        raise ValueError("RequestContentProvider callback returned no payload")
+
+    if isinstance(raw_payload, dict):
+        return normalize_provider_payload(raw_payload)
+
+    if isinstance(raw_payload, (bytes, bytearray)):
+        text = raw_payload.decode("utf-8")
+    else:
+        text = str(raw_payload)
+
+    if not text.strip():
+        raise ValueError("RequestContentProvider callback returned empty payload")
+
+    try:
+        decoded = json.loads(text)
+    except Exception as exc:
+        raise ValueError("RequestContentProvider callback returned invalid JSON") from exc
+
+    return normalize_provider_payload(decoded)
+
+
 def parse_focus_point(value) -> Optional[Tuple[int, int]]:
     if value is None:
         return None
@@ -826,6 +869,12 @@ class PyMobileCommProvider:
         self._logger.info("PyMobileComm module imported from: %s", getattr(module, "__file__", "<unknown>"))
         self._comm = module.CMobileCommunication()
         self._lock = threading.Lock()
+        self._request_state_lock = threading.Lock()
+        self._pending_provider_event: Optional[threading.Event] = None
+        self._pending_provider_payload: Optional[dict] = None
+        self._pending_provider_error: Optional[Exception] = None
+        self._logger.info("registering SetOnControlOnceMsg callback")
+        self._comm.SetOnControlOnceMsg(self._on_control_received)
         self._engine = MobileCommEngine(self._comm, self._logger)
         self._engine.configure()
         log_adb_devices(self._logger)
@@ -837,12 +886,68 @@ class PyMobileCommProvider:
         self._engine.start()
         self._logger.info("PyMobileComm provider initialized")
 
-    def fetch(self) -> dict:
-        with self._lock:
-            self._logger.info("calling GetContentProvider")
-            data = self._comm.GetContentProvider()
-            self._logger.info("GetContentProvider returned type=%s", type(data).__name__)
+    def _set_pending_provider_result(
+        self,
+        payload: Optional[dict] = None,
+        error: Optional[Exception] = None,
+    ) -> None:
+        with self._request_state_lock:
+            pending_event = self._pending_provider_event
+            if pending_event is None:
+                self._logger.warning("provider callback received without a pending request")
+                return
+            self._pending_provider_payload = payload
+            self._pending_provider_error = error
+        pending_event.set()
+
+    def _on_control_received(self, raw_payload) -> None:
+        try:
+            payload = parse_provider_callback_payload(raw_payload)
+        except Exception as exc:
+            self._logger.exception("failed to parse RequestContentProvider callback payload")
+            self._set_pending_provider_result(error=exc)
+            return
+
+        self._logger.info(
+            "RequestContentProvider callback received keys=%s",
+            ",".join(sorted(payload.keys())),
+        )
+        self._set_pending_provider_result(payload=payload)
+
+    def _request_provider_locked(self, timeout_s: float = 3.0) -> dict:
+        wait_timeout_s = max(float(timeout_s), 0.0)
+        request_event = threading.Event()
+        with self._request_state_lock:
+            self._pending_provider_event = request_event
+            self._pending_provider_payload = None
+            self._pending_provider_error = None
+
+        try:
+            self._logger.info("calling RequestContentProvider")
+            self._comm.RequestContentProvider()
+            if not request_event.wait(timeout=wait_timeout_s):
+                raise TimeoutError(f"RequestContentProvider timed out after {wait_timeout_s:.3f}s")
+
+            with self._request_state_lock:
+                error = self._pending_provider_error
+                data = self._pending_provider_payload
+
+            if error is not None:
+                raise error
+            if data is None:
+                raise ValueError("RequestContentProvider callback returned no payload")
+
+            self._logger.info("RequestContentProvider returned type=%s", type(data).__name__)
             return data
+        finally:
+            with self._request_state_lock:
+                self._pending_provider_event = None
+                self._pending_provider_payload = None
+                self._pending_provider_error = None
+
+    def fetch(self, timeout_s: float = 3.0) -> dict:
+        with self._lock:
+            return self._request_provider_locked(timeout_s=timeout_s)
 
     def ensure_connected_for_online(
         self,
@@ -922,9 +1027,7 @@ class PyMobileCommProvider:
             if not self.ensure_connected_for_online(timeout_s, poll_interval_s, trace_id=trace_id):
                 return {}
             log_online_timepoint(self._logger, trace_id, "provider_fetch_start")
-            self._logger.info("calling GetContentProvider")
-            data = self._comm.GetContentProvider()
-            self._logger.info("GetContentProvider returned type=%s", type(data).__name__)
+            data = self._request_provider_locked(timeout_s=timeout_s)
             log_online_timepoint(self._logger, trace_id, "provider_fetch_completed", provider_type=type(data).__name__)
             return data
 
@@ -1767,9 +1870,9 @@ def normalize_online_value(value):
 
 def convert_provider_data(raw_data: dict) -> dict:
     if raw_data is None:
-        raise ValueError("GetContentProvider returned None")
+        raise ValueError("Provider fetch returned None")
     if not isinstance(raw_data, dict):
-        raise TypeError(f"GetContentProvider must return dict, got {type(raw_data).__name__}")
+        raise TypeError(f"Provider fetch must return dict, got {type(raw_data).__name__}")
 
     is_live = raw_data.get("isLive")
     is_freeze = not is_live if is_live is not None else None

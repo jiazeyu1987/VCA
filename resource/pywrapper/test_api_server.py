@@ -1231,10 +1231,17 @@ class ApiServerTests(unittest.TestCase):
         provider._logger = self.make_null_logger("provider_reconnect_test")
         provider._comm = Mock()
         provider._lock = threading.Lock()
+        provider._request_state_lock = threading.Lock()
+        provider._pending_provider_event = None
+        provider._pending_provider_payload = None
+        provider._pending_provider_error = None
         engine = Mock()
         engine.get_latest_state.side_effect = states
         provider._engine = engine
         return provider
+
+    def configure_provider_request_payload(self, provider, payload):
+        provider._comm.RequestContentProvider.side_effect = lambda: provider._on_control_received(payload)
 
     def test_fetch_online_reconnects_when_state_missing_and_returns_empty_provider_after_timeout(self):
         provider = self.make_provider_for_reconnect_tests([None, None])
@@ -1243,31 +1250,67 @@ class ApiServerTests(unittest.TestCase):
 
         provider._comm.RestartAdbServer.assert_called_once()
         provider._comm.Auto_Initialize.assert_called_once()
-        provider._comm.GetContentProvider.assert_not_called()
+        provider._comm.RequestContentProvider.assert_not_called()
         self.assertEqual(data, {})
+
+    def test_fetch_normalizes_focus_coordinates_from_callback_payload(self):
+        provider = self.make_provider_for_reconnect_tests([make_state()])
+        self.configure_provider_request_payload(
+            provider,
+            json.dumps(
+                {
+                    "depth": "40",
+                    "focus_x": "434.85052",
+                    "focus_y": "272.8398",
+                }
+            ),
+        )
+
+        data = provider.fetch(timeout_s=0.1)
+
+        provider._comm.RequestContentProvider.assert_called_once()
+        self.assertEqual(data["depth"], "40")
+        self.assertEqual(data["focus_point"], "PointF(434.85052, 272.8398)")
+
+    def test_fetch_raises_timeout_when_provider_callback_missing(self):
+        provider = self.make_provider_for_reconnect_tests([make_state()])
+
+        with self.assertRaisesRegex(TimeoutError, "RequestContentProvider timed out"):
+            provider.fetch(timeout_s=0.0)
+
+        provider._comm.RequestContentProvider.assert_called_once()
+
+    def test_fetch_raises_on_invalid_provider_callback_json(self):
+        provider = self.make_provider_for_reconnect_tests([make_state()])
+        self.configure_provider_request_payload(provider, "{bad json}")
+
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            provider.fetch(timeout_s=0.1)
+
+        provider._comm.RequestContentProvider.assert_called_once()
 
     def test_fetch_online_reconnects_disconnected_state_then_fetches_after_success(self):
         provider = self.make_provider_for_reconnect_tests(
             [make_state(control=0, image=0), make_state(control=1, image=1)]
         )
-        provider._comm.GetContentProvider.return_value = {"depth": "40"}
+        self.configure_provider_request_payload(provider, json.dumps({"depth": "40"}))
 
         data = provider.fetch_online(timeout_s=0.1, poll_interval_s=0.0)
 
         provider._comm.RestartAdbServer.assert_called_once()
         provider._comm.Auto_Initialize.assert_called_once()
-        provider._comm.GetContentProvider.assert_called_once()
+        provider._comm.RequestContentProvider.assert_called_once()
         self.assertEqual(data, {"depth": "40"})
 
     def test_fetch_online_skips_reconnect_when_state_connected(self):
         provider = self.make_provider_for_reconnect_tests([make_state()])
-        provider._comm.GetContentProvider.return_value = {"depth": "41"}
+        self.configure_provider_request_payload(provider, json.dumps({"depth": "41"}))
 
         data = provider.fetch_online(timeout_s=0.1, poll_interval_s=0.0)
 
         provider._comm.RestartAdbServer.assert_not_called()
         provider._comm.Auto_Initialize.assert_not_called()
-        provider._comm.GetContentProvider.assert_called_once()
+        provider._comm.RequestContentProvider.assert_called_once()
         self.assertEqual(data, {"depth": "41"})
 
     def test_online_failed_reconnect_keeps_online_response_shape(self):
@@ -1292,7 +1335,7 @@ class ApiServerTests(unittest.TestCase):
                 "FocusPoint": None,
             },
         )
-        provider._comm.GetContentProvider.assert_not_called()
+        provider._comm.RequestContentProvider.assert_not_called()
 
     def test_fetch_online_logs_reconnect_timepoints(self):
         stream = StringIO()
@@ -1308,10 +1351,16 @@ class ApiServerTests(unittest.TestCase):
         provider._logger = logger
         provider._comm = Mock()
         provider._lock = threading.Lock()
+        provider._request_state_lock = threading.Lock()
+        provider._pending_provider_event = None
+        provider._pending_provider_payload = None
+        provider._pending_provider_error = None
         engine = Mock()
         engine.get_latest_state.side_effect = [make_state(control=0, image=0), make_state()]
         provider._engine = engine
-        provider._comm.GetContentProvider.return_value = {"depth": "42"}
+        provider._comm.RequestContentProvider.side_effect = lambda: provider._on_control_received(
+            json.dumps({"depth": "42"})
+        )
 
         provider.fetch_online(timeout_s=0.1, poll_interval_s=0.0, trace_id="unit-trace")
 
