@@ -6,6 +6,22 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ServerScriptTests(unittest.TestCase):
+    def test_package_server_bat_exists_and_calls_tools_script(self):
+        batch_path = WORKSPACE_ROOT / "package_pywrapper_server.bat"
+
+        self.assertTrue(batch_path.exists(), batch_path)
+        text = batch_path.read_text(encoding="utf-8")
+        self.assertIn(r"tools\package_pywrapper_server.ps1", text)
+        self.assertIn("powershell -NoProfile -ExecutionPolicy Bypass -File", text)
+
+    def test_close_server_bat_exists_and_targets_server_port(self):
+        batch_path = WORKSPACE_ROOT / "closeserver.bat"
+
+        self.assertTrue(batch_path.exists(), batch_path)
+        text = batch_path.read_text(encoding="utf-8")
+        self.assertIn("Get-NetTCPConnection", text)
+        self.assertIn("30415", text)
+
     def test_restart_server_bat_exists_and_calls_tools_script(self):
         batch_path = WORKSPACE_ROOT / "restart_server.bat"
 
