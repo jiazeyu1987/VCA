@@ -1226,6 +1226,54 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(snapshot.ImageInfoLinkState, 1)
         self.assertEqual(snapshot.USBLinkState, 1)
 
+    def test_mobile_comm_engine_caches_latest_device_state_without_info_log(self):
+        comm = Mock()
+        logger, stream = self.make_stream_logger("test_mobile_comm_engine_caches_latest_device_state_without_info_log")
+        engine = api_server.MobileCommEngine(
+            comm,
+            logger,
+            hwnd_factory=lambda: 12345,
+            hwnd_destroyer=lambda hwnd: None,
+            stream_interval_s=0.01,
+        )
+        state = api_server.StateInfo(
+            Version=1,
+            AdbServer=1,
+            LicenseType=1,
+            ControlLinkState=0,
+            ImageInfoLinkState=0,
+            USBLinkState=0,
+            AppRunState=0,
+        )
+
+        engine._on_state_info_received(api_server.ctypes.addressof(state))
+
+        snapshot = engine.get_latest_state()
+        self.assertEqual(snapshot.ControlLinkState, 0)
+        self.assertEqual(snapshot.ImageInfoLinkState, 0)
+        self.assertEqual(snapshot.USBLinkState, 0)
+        self.assertNotIn("device state:", stream.getvalue())
+
+    def test_mobile_comm_engine_caches_latest_frame_without_info_log(self):
+        comm = Mock()
+        logger, stream = self.make_stream_logger("test_mobile_comm_engine_caches_latest_frame_without_info_log")
+        engine = api_server.MobileCommEngine(
+            comm,
+            logger,
+            hwnd_factory=lambda: 12345,
+            hwnd_destroyer=lambda hwnd: None,
+            stream_interval_s=0.01,
+        )
+        image = np.zeros((512, 600, 4), dtype=np.uint8)
+
+        engine._on_image_info_received(140723069053216, image)
+
+        frame = engine.get_latest_frame()
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.image.shape, (512, 600, 4))
+        self.assertEqual(frame.seq, 1)
+        self.assertNotIn("image callback received", stream.getvalue())
+
     def make_provider_for_reconnect_tests(self, states):
         provider = object.__new__(api_server.PyMobileCommProvider)
         provider._logger = self.make_null_logger("provider_reconnect_test")

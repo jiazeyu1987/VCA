@@ -805,8 +805,6 @@ class MobileCommEngine:
             self._stop_event.wait(self._stream_interval_s)
 
     def _on_image_info_received(self, header_ptr, image_matrix) -> None:
-        shape = getattr(image_matrix, "shape", None)
-        self._logger.info("image callback received header_ptr=%s image_shape=%s", header_ptr, shape)
         try:
             frame = np.array(image_matrix, copy=True)
         except Exception:
@@ -835,18 +833,6 @@ class MobileCommEngine:
         except Exception:
             self._logger.exception("failed to parse state callback pointer")
             return
-
-        self._logger.info(
-            "device state: Version=%s AdbServer=%s LicenseType=%s ControlLinkState=%s "
-            "ImageInfoLinkState=%s USBLinkState=%s AppRunState=%s",
-            state.Version,
-            state.AdbServer,
-            state.LicenseType,
-            state.ControlLinkState,
-            state.ImageInfoLinkState,
-            state.USBLinkState,
-            state.AppRunState,
-        )
         snapshot = DeviceStateSnapshot(
             Version=state.Version,
             AdbServer=state.AdbServer,
