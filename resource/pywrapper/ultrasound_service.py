@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import time
@@ -109,16 +110,29 @@ class UltrasoundService(QObject):
             "FocusPoint": focus_point,
         }
 
-    def _on_control_received(self, raw_payload):
-        try:
-            if isinstance(raw_payload, dict):
-                provider_dict = raw_payload
-            else:
-                provider_dict = json.loads(str(raw_payload))
-            result = self._convert_to_standard_format(provider_dict)
-            self.provider_updated.emit(result)
-        except Exception:
-            logging.exception("failed to parse provider callback payload")
+    def extract_valid_json(self, raw_str):
+        match = re.search(r"\{.*?\}.*?", raw_str, re.DOTALL)
+
+        if match:
+            try:
+                json_str = match.group(0)
+                json_str = json_str[: json_str.rfind("}") + 1]
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                print(f"Extracted JSON still failed to parse: {json_str}")
+                return None
+        else:
+            print(f"No valid JSON structure found in string: {raw_str}")
+            return None
+
+    def _on_control_received(self, raw_string):
+        print(raw_string)
+        provider_dict = self.extract_valid_json(raw_string)
+
+        print(f"[Python final extracted dict]: {provider_dict}")
+
+        result = self._convert_to_standard_format(provider_dict)
+        self.provider_updated.emit(result)
 
     def _on_stream_data_received(self, header_ptr, image_matrix):
         try:
