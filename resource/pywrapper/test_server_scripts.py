@@ -79,6 +79,19 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn(".git", text)
         self.assertIn("push -u origin HEAD:main", text)
 
+    def test_publish_release_stops_running_server_before_packaging(self):
+        script_path = WORKSPACE_ROOT / "tools" / "publish_release.ps1"
+
+        self.assertTrue(script_path.exists(), script_path)
+        text = script_path.read_text(encoding="utf-8")
+        stop_assignment = '$stopScript = Join-Path $packageRoot "closeserver.bat"'
+        package_call = "& $packageScript"
+        stop_call = "& $stopScript"
+        self.assertIn(stop_assignment, text)
+        self.assertIn(stop_call, text)
+        self.assertLess(text.index(stop_call), text.index(package_call))
+        self.assertIn("Stop script failed with exit code", text)
+
 
 if __name__ == "__main__":
     unittest.main()

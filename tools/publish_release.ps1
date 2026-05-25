@@ -2,16 +2,21 @@ $ErrorActionPreference = "Stop"
 
 $packageRoot = "D:\ocr3"
 $packageScript = Join-Path $packageRoot "package_pywrapper_server.bat"
+$stopScript = Join-Path $packageRoot "closeserver.bat"
 $releaseSourceDir = Join-Path $packageRoot "dist\OCRSERVER"
 $releaseRepo = "D:\ocr3\VA"
 $commitMessage = "release: OCRSERVER $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
 Write-Host "[INFO] Package root: $packageRoot"
+Write-Host "[INFO] Stop script: $stopScript"
 Write-Host "[INFO] Release source: $releaseSourceDir"
 Write-Host "[INFO] Release repo: $releaseRepo"
 
 if (-not (Test-Path $packageScript)) {
     throw "Package script not found: $packageScript"
+}
+if (-not (Test-Path $stopScript)) {
+    throw "Stop script not found: $stopScript"
 }
 if (-not (Test-Path $releaseRepo)) {
     throw "Release repo not found: $releaseRepo"
@@ -36,6 +41,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 if (-not [string]::IsNullOrWhiteSpace($dirty)) {
     throw "Release repo is not clean: $releaseRepo"
+}
+
+& $stopScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Stop script failed with exit code $LASTEXITCODE"
 }
 
 & $packageScript
