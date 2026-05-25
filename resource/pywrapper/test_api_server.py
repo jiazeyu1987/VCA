@@ -323,6 +323,29 @@ class ApiServerTests(unittest.TestCase):
         )
 
         self.assertEqual(config.screenshot_capture_bbox, (10, 20, 110, 220))
+        self.assertTrue(config.peak_detect_enabled)
+
+    def test_parse_offline_config_forces_peak_detect_enabled(self):
+        config = api_server.parse_offline_config(
+            {
+                "peak_detect": {
+                    "enabled": False,
+                    "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                    "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "difference_threshold": 1.5,
+                },
+                "offline_peak": {"enabled": False},
+                "offline_tmp_frames": {"enabled": False, "dir": "D:/software_data/tmp"},
+            },
+            self.make_null_logger("test_parse_offline_config_forces_peak_detect_enabled"),
+        )
+
+        self.assertTrue(config.peak_detect_enabled)
+
+    def test_default_settings_do_not_expose_peak_detect_enabled_switch(self):
+        settings_text = Path(__file__).resolve().parents[2].joinpath("settings").read_text(encoding="utf-8")
+
+        self.assertNotIn('"enabled": false', settings_text.split('"peak_detect":', 1)[1].split('"peak_debug_log"', 1)[0])
 
     def test_offline_requires_time_out_and_is_save_fields(self):
         manager = api_server.OfflineSessionManager(

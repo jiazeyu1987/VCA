@@ -672,7 +672,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     config = OfflineConfig(
         screenshot_test_enabled=bool(screenshot_cfg.get("enabled", False)),
         screenshot_capture_bbox=screenshot_capture_bbox,
-        peak_detect_enabled=bool(peak.get("enabled", False)),
+        peak_detect_enabled=True,
         roi2_extension_params=dict(roi2_ext),
         roi3_extension_params=dict(roi3_ext),
         difference_threshold=float(threshold),

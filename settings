@@ -33,7 +33,6 @@
 
   "_comment_peak_detect": "SimpleFEM-style focus+ROI2/ROI3: detect green-line intersection (anchor) on BEFORE once; compute ROI2/ROI3 by extension_params; reuse same ROI2 on AFTER; compute roi2_diff=(after_mean-before_mean) and compare with difference_threshold (>= green else red). If focus fails, reuse last successful anchor/ROI rects.",
   "peak_detect": {
-    "enabled": false,
     "difference_threshold": 0.5,
     "roi2_extension_params": { "left": 40, "right": 40, "top": 50, "bottom": 30 },
     "roi3_extension_params": { "left": 30, "right": 30, "top": 50, "bottom": 100 },
