@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -12,6 +13,7 @@ def load_client_module():
     spec = importlib.util.spec_from_file_location("test_ocr_client_gui", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -77,6 +79,18 @@ class TestOcrClientGuiTests(unittest.TestCase):
                 "diff_path": "D:/tmp/diff.png",
             },
         )
+
+    def test_build_letterboxed_preview_preserves_ratio_and_uses_black_background(self):
+        source = self.client.Image.new("RGB", (100, 200), (255, 255, 255))
+
+        preview = self.client.build_letterboxed_preview(source, (420, 240))
+
+        self.assertEqual(preview.size, (420, 240))
+        self.assertEqual(preview.getpixel((0, 120)), (0, 0, 0))
+        self.assertEqual(preview.getpixel((149, 120)), (0, 0, 0))
+        self.assertEqual(preview.getpixel((150, 120)), (255, 255, 255))
+        self.assertEqual(preview.getpixel((269, 120)), (255, 255, 255))
+        self.assertEqual(preview.getpixel((270, 120)), (0, 0, 0))
 
     def test_launcher_bat_targets_single_file_gui_script(self):
         batch_path = WORKSPACE_ROOT / "run_test_ocr_client_gui.bat"

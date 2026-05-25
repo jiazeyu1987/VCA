@@ -21,6 +21,8 @@ DEFAULT_GOAL_TEXT = (
     "offline命令每5秒随机发送一个,但是point_id要成对,也就是必须有也只能有两个相同的point_id"
 )
 SCREENSHOT_KEYS = ("before_path", "after_path", "diff_path")
+PREVIEW_CANVAS_SIZE = (420, 240)
+PREVIEW_BACKGROUND_COLOR = (0, 0, 0)
 
 
 @dataclass
@@ -190,6 +192,33 @@ def extract_screenshot_paths(response: Optional[dict[str, Any]]) -> dict[str, st
     return result
 
 
+def build_letterboxed_preview(
+    image: Image.Image,
+    canvas_size: tuple[int, int] = PREVIEW_CANVAS_SIZE,
+    background_color: tuple[int, int, int] = PREVIEW_BACKGROUND_COLOR,
+) -> Image.Image:
+    canvas_width, canvas_height = canvas_size
+    if canvas_width <= 0 or canvas_height <= 0:
+        raise ValueError(f"preview canvas size must be positive: {canvas_size}")
+
+    source = image.convert("RGB")
+    if source.width <= 0 or source.height <= 0:
+        raise ValueError(f"preview source image size must be positive: {source.size}")
+
+    scale = min(canvas_width / source.width, canvas_height / source.height)
+    preview_size = (
+        min(canvas_width, max(1, int(round(source.width * scale)))),
+        min(canvas_height, max(1, int(round(source.height * scale)))),
+    )
+    preview = source.resize(preview_size, Image.LANCZOS)
+
+    canvas = Image.new("RGB", canvas_size, background_color)
+    left = (canvas_width - preview.width) // 2
+    top = (canvas_height - preview.height) // 2
+    canvas.paste(preview, (left, top))
+    return canvas
+
+
 class SimulatorApp:
     def __init__(self):
         self.root = tk.Tk()
@@ -312,7 +341,7 @@ class SimulatorApp:
             ttk.Label(frame, text=key).grid(row=0, column=0, sticky="w")
             image_label = ttk.Label(frame, text="暂无截图", anchor="center")
             image_label.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
-            path_label = ttk.Label(frame, textvariable=self.preview_path_vars[key], wraplength=420, justify="left")
+            path_label = ttk.Label(frame, textvariable=self.preview_path_vars[key], wraplength=PREVIEW_CANVAS_SIZE[0], justify="left")
             path_label.grid(row=2, column=0, sticky="w")
             self.preview_widgets[key] = {
                 "image_label": image_label,
@@ -630,8 +659,7 @@ class SimulatorApp:
                 continue
 
             with Image.open(path) as image:
-                preview = image.copy()
-            preview.thumbnail((420, 240))
+                preview = build_letterboxed_preview(image, PREVIEW_CANVAS_SIZE)
             photo = ImageTk.PhotoImage(preview)
             self.preview_photo_refs[key] = photo
             widget.configure(image=photo, text="")
