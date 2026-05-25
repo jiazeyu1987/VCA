@@ -445,7 +445,13 @@ def compute_roi3_metrics(image: np.ndarray, rect: Tuple[int, int, int, int]) -> 
 
 
 def positive_diff_image(before: np.ndarray, after: np.ndarray) -> np.ndarray:
-    diff = np.asarray(after, dtype=np.float32) - np.asarray(before, dtype=np.float32)
+    before_arr = np.asarray(before, dtype=np.float32)
+    after_arr = np.asarray(after, dtype=np.float32)
+    if before_arr.ndim == 3 and before_arr.shape[2] == 4:
+        before_arr = before_arr[:, :, :3]
+    if after_arr.ndim == 3 and after_arr.shape[2] == 4:
+        after_arr = after_arr[:, :, :3]
+    diff = after_arr - before_arr
     diff[diff < 0] = 0
     return diff.astype(np.uint8)
 

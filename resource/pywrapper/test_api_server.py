@@ -762,6 +762,19 @@ class ApiServerTests(unittest.TestCase):
             )
             self.assertFalse(np.array_equal(actual, raw))
 
+    def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
+        before = np.zeros((4, 4, 4), dtype=np.uint8)
+        after = np.zeros((4, 4, 4), dtype=np.uint8)
+        before[:, :, :3] = 50
+        after[:, :, :3] = 60
+        before[:, :, 3] = 255
+        after[:, :, 3] = 255
+
+        diff = api_server.positive_diff_image(before, after)
+
+        self.assertEqual(diff.shape, (4, 4, 3))
+        self.assertEqual(int(np.max(diff)), 10)
+
     def test_offline_output_logs_flush_and_output_paths(self):
         logger, stream = self.make_stream_logger("test_offline_output_logs_flush_and_output_paths")
         with tempfile.TemporaryDirectory() as tmp:
