@@ -1189,6 +1189,28 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("depth", log_text)
         self.assertIn("focus_point", log_text)
 
+    def test_online_logs_final_response_json(self):
+        logger, stream = self.make_stream_logger("test_online_logs_final_response_json")
+
+        response = api_server.handle_request(
+            'ONLINE;31415;{}',
+            provider_fetcher=lambda: {
+                "isLive": True,
+                "mode": 2,
+                "focus_depth": "7.5",
+                "guankuan_a": "10.1",
+                "guankuan_b": "20.2",
+                "depth": "35",
+            },
+            logger=logger,
+        )
+
+        log_text = stream.getvalue()
+        self.assertIn("ONLINE response JSON:", log_text)
+        self.assertIn('"SkinDepth": 7.5', log_text)
+        self.assertIn('"A": 10.1', log_text)
+        self.assertEqual(json.loads(response)["Depth"], 35)
+
     def test_online_logs_timepoints(self):
         stream = StringIO()
         logger = logging.getLogger("test_online_logs_timepoints")
@@ -1355,6 +1377,40 @@ class ApiServerTests(unittest.TestCase):
         provider._comm.RequestContentProvider.assert_called_once()
         self.assertEqual(data["depth"], "40")
         self.assertEqual(data["focus_point"], "PointF(434.85052, 272.8398)")
+
+    def test_fetch_extracts_json_from_wrapped_provider_callback_payload(self):
+        provider = self.make_provider_for_reconnect_tests([make_state()])
+        self.configure_provider_request_payload(
+            provider,
+            'provider={"focus_depth":"7.5","guankuan_a":"10.1","guankuan_b":"20.2","depth":"35","isLive":true,"mode":2,"focus_x":"111.25","focus_y":"222.5"} trailing text',
+        )
+
+        data = provider.fetch(timeout_s=0.1)
+
+        provider._comm.RequestContentProvider.assert_called_once()
+        self.assertEqual(data["focus_depth"], "7.5")
+        self.assertEqual(data["guankuan_a"], "10.1")
+        self.assertEqual(data["guankuan_b"], "20.2")
+        self.assertEqual(data["depth"], "35")
+        self.assertEqual(data["focus_point"], "PointF(111.25, 222.5)")
+
+    def test_provider_callback_logs_raw_and_normalized_payload(self):
+        logger, stream = self.make_stream_logger("test_provider_callback_logs_raw_and_normalized_payload")
+        provider = self.make_provider_for_reconnect_tests([make_state()])
+        provider._logger = logger
+        self.configure_provider_request_payload(
+            provider,
+            'provider={"depth":"35","focus_x":"111.25","focus_y":"222.5"} trailing text',
+        )
+
+        data = provider.fetch(timeout_s=0.1)
+
+        self.assertEqual(data["focus_point"], "PointF(111.25, 222.5)")
+        log_text = stream.getvalue()
+        self.assertIn("RequestContentProvider callback raw payload:", log_text)
+        self.assertIn("RequestContentProvider callback normalized payload:", log_text)
+        self.assertIn('"depth": "35"', log_text)
+        self.assertIn('"focus_point": "PointF(111.25, 222.5)"', log_text)
 
     def test_fetch_raises_timeout_when_provider_callback_missing(self):
         provider = self.make_provider_for_reconnect_tests([make_state()])

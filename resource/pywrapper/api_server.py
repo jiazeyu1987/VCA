@@ -322,8 +322,18 @@ def parse_provider_callback_payload(raw_payload) -> dict:
 
     try:
         decoded = json.loads(text)
-    except Exception as exc:
-        raise ValueError("RequestContentProvider callback returned invalid JSON") from exc
+    except Exception as primary_exc:
+        object_start = text.find("{")
+        if object_start < 0:
+            raise ValueError("RequestContentProvider callback returned invalid JSON") from primary_exc
+        object_end = scan_json_end(text, object_start)
+        if object_end < 0:
+            raise ValueError("RequestContentProvider callback returned invalid JSON") from primary_exc
+        embedded_text = text[object_start:object_end]
+        try:
+            decoded = json.loads(embedded_text)
+        except Exception as exc:
+            raise ValueError("RequestContentProvider callback returned invalid JSON") from exc
 
     return normalize_provider_payload(decoded)
 
@@ -893,6 +903,12 @@ class PyMobileCommProvider:
         pending_event.set()
 
     def _on_control_received(self, raw_payload) -> None:
+        self._logger.info(
+            "RequestContentProvider callback raw payload: type=%s len=%s preview=%r",
+            type(raw_payload).__name__,
+            len(raw_payload) if isinstance(raw_payload, (str, bytes, bytearray)) else None,
+            raw_payload[:500] if isinstance(raw_payload, (str, bytes, bytearray)) else raw_payload,
+        )
         try:
             payload = parse_provider_callback_payload(raw_payload)
         except Exception as exc:
@@ -904,6 +920,7 @@ class PyMobileCommProvider:
             "RequestContentProvider callback received keys=%s",
             ",".join(sorted(payload.keys())),
         )
+        self._logger.info("RequestContentProvider callback normalized payload: %s", safe_json_text(payload))
         self._set_pending_provider_result(payload=payload)
 
     def _request_provider_locked(self, timeout_s: float = 3.0) -> dict:
@@ -930,6 +947,7 @@ class PyMobileCommProvider:
                 raise ValueError("RequestContentProvider callback returned no payload")
 
             self._logger.info("RequestContentProvider returned type=%s", type(data).__name__)
+            self._logger.info("RequestContentProvider returned data: %s", safe_json_text(data))
             return data
         finally:
             with self._request_state_lock:
@@ -2057,6 +2075,8 @@ def handle_request(
         log_online_diagnostics(logger, raw_data, converted_data, trace_id=trace_id)
         log_online_timepoint(logger, trace_id, "json_encode_start", response_kind="online_success")
         response = json_response(converted_data)
+        if logger is not None:
+            logger.info("ONLINE response JSON: %s", response)
         log_online_timepoint(logger, trace_id, "json_encode_completed", response_len=len(response))
         return response
 
