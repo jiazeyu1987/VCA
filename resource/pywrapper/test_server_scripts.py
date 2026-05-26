@@ -14,13 +14,17 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn(r"tools\package_pywrapper_server.ps1", text)
         self.assertIn("powershell -NoProfile -ExecutionPolicy Bypass -File", text)
 
-    def test_close_server_bat_exists_and_targets_server_port(self):
+    def test_close_server_bat_exists_and_targets_server_port_and_process_name(self):
         batch_path = WORKSPACE_ROOT / "closeserver.bat"
 
         self.assertTrue(batch_path.exists(), batch_path)
         text = batch_path.read_text(encoding="utf-8")
         self.assertIn("Get-NetTCPConnection", text)
         self.assertIn("30415", text)
+        self.assertIn("ocrapp_pureray", text)
+        self.assertIn("Get-Process", text)
+        self.assertNotIn("foreach ($pid", text)
+        self.assertIn("foreach ($targetPid", text)
 
     def test_restart_server_bat_exists_and_calls_tools_script(self):
         batch_path = WORKSPACE_ROOT / "restart_server.bat"

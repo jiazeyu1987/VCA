@@ -43,5 +43,5 @@
   "peak_debug_log": { "enabled": false }
   ,
   "_comment_offline_tmp_frames": "When enabled, buffer frames from first OFFLINE signal and flush (save images + append JSONL) only when the second OFFLINE signal arrives. Per-frame JSONL contains: filename, roi1_mean, roi2_mean, roi3_mean. Additional event lines are appended with a different schema: {event:'before_saved'/'after_saved', filename,...}.",
-  "offline_tmp_frames": { "enabled": false, "dir": "D:/software_data/tmp", "max_buffer_frames": 2500 }
+  "offline_tmp_frames": { "enabled": true, "dir": "D:/software_data/tmp", "max_buffer_frames": 2500 }
 }
