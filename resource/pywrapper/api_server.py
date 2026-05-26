@@ -25,6 +25,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageGrab
 PASSWORD = "31415"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 30415
+DEVICE_RECONNECT_FAILED_EXIT_CODE = 70
+ONLINE_PROVIDER_TIMEOUT_SECONDS = 3.0
+ONLINE_RECONNECT_TIMEOUT_SECONDS = 2.0
 EXTERNAL_RUNTIME_DIR = Path(r"D:\ocr3\resource\pywrapper")
 REQUIRED_RUNTIME_FILES = (
     "PyMobileComm.pyd",
@@ -256,6 +259,23 @@ def is_device_connected(state: Optional[DeviceStateSnapshot]) -> bool:
         and state.ControlLinkState == 1
         and state.ImageInfoLinkState == 1
     )
+
+
+def exit_process_after_failed_online_reconnect(
+    logger: Optional[logging.Logger],
+    state: Optional[DeviceStateSnapshot],
+) -> None:
+    state_text = safe_json_text(device_state_to_dict(state))
+    if logger is not None:
+        logger.critical(
+            "online_device_reconnect_failed_exit_process exit_code=%s state=%s",
+            DEVICE_RECONNECT_FAILED_EXIT_CODE,
+            state_text,
+        )
+        for handler in logger.handlers:
+            handler.flush()
+    os._exit(DEVICE_RECONNECT_FAILED_EXIT_CODE)
+    raise RuntimeError("os._exit returned unexpectedly after failed ONLINE reconnect")
 
 
 def log_adb_devices(logger: logging.Logger) -> None:
@@ -923,7 +943,7 @@ class PyMobileCommProvider:
         self._logger.info("RequestContentProvider callback normalized payload: %s", safe_json_text(payload))
         self._set_pending_provider_result(payload=payload)
 
-    def _request_provider_locked(self, timeout_s: float = 3.0) -> dict:
+    def _request_provider_locked(self, timeout_s: float = ONLINE_PROVIDER_TIMEOUT_SECONDS) -> dict:
         wait_timeout_s = max(float(timeout_s), 0.0)
         request_event = threading.Event()
         with self._request_state_lock:
@@ -955,13 +975,13 @@ class PyMobileCommProvider:
                 self._pending_provider_payload = None
                 self._pending_provider_error = None
 
-    def fetch(self, timeout_s: float = 3.0) -> dict:
+    def fetch(self, timeout_s: float = ONLINE_PROVIDER_TIMEOUT_SECONDS) -> dict:
         with self._lock:
             return self._request_provider_locked(timeout_s=timeout_s)
 
     def ensure_connected_for_online(
         self,
-        timeout_s: float = 3.0,
+        timeout_s: float = ONLINE_RECONNECT_TIMEOUT_SECONDS,
         poll_interval_s: float = 0.05,
         trace_id: Optional[str] = None,
     ) -> bool:
@@ -1025,16 +1045,17 @@ class PyMobileCommProvider:
             connected=False,
             state=safe_json_text(device_state_to_dict(final_state)),
         )
-        return False
+        exit_process_after_failed_online_reconnect(self._logger, final_state)
 
     def fetch_online(
         self,
-        timeout_s: float = 3.0,
+        timeout_s: float = ONLINE_PROVIDER_TIMEOUT_SECONDS,
         poll_interval_s: float = 0.05,
         trace_id: Optional[str] = None,
+        reconnect_timeout_s: float = ONLINE_RECONNECT_TIMEOUT_SECONDS,
     ) -> dict:
         with self._lock:
-            if not self.ensure_connected_for_online(timeout_s, poll_interval_s, trace_id=trace_id):
+            if not self.ensure_connected_for_online(reconnect_timeout_s, poll_interval_s, trace_id=trace_id):
                 return {}
             log_online_timepoint(self._logger, trace_id, "provider_fetch_start")
             data = self._request_provider_locked(timeout_s=timeout_s)

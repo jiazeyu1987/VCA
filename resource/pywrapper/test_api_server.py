@@ -1349,15 +1349,54 @@ class ApiServerTests(unittest.TestCase):
     def configure_provider_request_payload(self, provider, payload):
         provider._comm.RequestContentProvider.side_effect = lambda: provider._on_control_received(payload)
 
-    def test_fetch_online_reconnects_when_state_missing_and_returns_empty_provider_after_timeout(self):
-        provider = self.make_provider_for_reconnect_tests([None, None])
+    def test_fetch_online_uses_two_second_reconnect_timeout_by_default(self):
+        provider = object.__new__(api_server.PyMobileCommProvider)
+        provider._logger = self.make_null_logger("test_fetch_online_uses_two_second_reconnect_timeout_by_default")
+        provider._lock = threading.Lock()
+        observed = {}
 
-        data = provider.fetch_online(timeout_s=0.0, poll_interval_s=0.0)
+        def ensure_connected(timeout_s, poll_interval_s, trace_id=None):
+            observed["reconnect_timeout_s"] = timeout_s
+            observed["poll_interval_s"] = poll_interval_s
+            observed["trace_id"] = trace_id
+            return True
+
+        def request_provider(timeout_s=3.0):
+            observed["provider_timeout_s"] = timeout_s
+            return {"depth": "40"}
+
+        provider.ensure_connected_for_online = ensure_connected
+        provider._request_provider_locked = request_provider
+
+        data = provider.fetch_online(trace_id="unit-trace")
+
+        self.assertEqual(data, {"depth": "40"})
+        self.assertEqual(observed["reconnect_timeout_s"], 2.0)
+        self.assertEqual(observed["provider_timeout_s"], 3.0)
+        self.assertEqual(observed["poll_interval_s"], 0.05)
+        self.assertEqual(observed["trace_id"], "unit-trace")
+
+    def test_fetch_online_exits_process_when_reconnect_still_disconnected(self):
+        provider = self.make_provider_for_reconnect_tests([None, None])
+        exit_codes = []
+        original_exit = api_server.os._exit
+
+        def fake_exit(exit_code):
+            exit_codes.append(exit_code)
+            raise SystemExit(exit_code)
+
+        try:
+            api_server.os._exit = fake_exit
+            with self.assertRaises(SystemExit) as raised:
+                provider.fetch_online(timeout_s=0.0, poll_interval_s=0.0, reconnect_timeout_s=0.0)
+        finally:
+            api_server.os._exit = original_exit
 
         provider._comm.RestartAdbServer.assert_called_once()
         provider._comm.Auto_Initialize.assert_called_once()
         provider._comm.RequestContentProvider.assert_not_called()
-        self.assertEqual(data, {})
+        self.assertEqual(raised.exception.code, 70)
+        self.assertEqual(exit_codes, [70])
 
     def test_fetch_normalizes_focus_coordinates_from_callback_payload(self):
         provider = self.make_provider_for_reconnect_tests([make_state()])
@@ -1453,28 +1492,31 @@ class ApiServerTests(unittest.TestCase):
         provider._comm.RequestContentProvider.assert_called_once()
         self.assertEqual(data, {"depth": "41"})
 
-    def test_online_failed_reconnect_keeps_online_response_shape(self):
+    def test_online_failed_reconnect_exits_before_returning_null_response(self):
         provider = self.make_provider_for_reconnect_tests([None, None])
+        exit_codes = []
+        original_exit = api_server.os._exit
 
-        response = api_server.handle_request(
-            'ONLINE;31415;{}',
-            provider_fetcher=lambda: provider.fetch_online(timeout_s=0.0, poll_interval_s=0.0),
-        )
+        def fake_exit(exit_code):
+            exit_codes.append(exit_code)
+            raise SystemExit(exit_code)
 
-        payload = json.loads(response)
-        self.assertEqual(
-            payload,
-            {
-                "SkinDepth": None,
-                "A": None,
-                "B": None,
-                "Alpha": 0,
-                "Depth": None,
-                "IsFreeze": None,
-                "isHIFU": False,
-                "FocusPoint": None,
-            },
-        )
+        try:
+            api_server.os._exit = fake_exit
+            with self.assertRaises(SystemExit) as raised:
+                api_server.handle_request(
+                    'ONLINE;31415;{}',
+                    provider_fetcher=lambda: provider.fetch_online(
+                        timeout_s=0.0,
+                        poll_interval_s=0.0,
+                        reconnect_timeout_s=0.0,
+                    ),
+                )
+        finally:
+            api_server.os._exit = original_exit
+
+        self.assertEqual(raised.exception.code, 70)
+        self.assertEqual(exit_codes, [70])
         provider._comm.RequestContentProvider.assert_not_called()
 
     def test_fetch_online_logs_reconnect_timepoints(self):
