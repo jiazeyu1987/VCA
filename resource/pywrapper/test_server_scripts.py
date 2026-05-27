@@ -19,7 +19,8 @@ class ServerScriptTests(unittest.TestCase):
 
         self.assertTrue(batch_path.exists(), batch_path)
         text = batch_path.read_text(encoding="utf-8")
-        self.assertIn("Get-NetTCPConnection", text)
+        self.assertIn("netstat -ano -p tcp", text)
+        self.assertNotIn("Get-NetTCPConnection", text)
         self.assertIn("30415", text)
         self.assertIn("ocrapp_pureray", text)
         self.assertIn("Get-Process", text)
@@ -51,6 +52,14 @@ class ServerScriptTests(unittest.TestCase):
         text = script_path.read_text(encoding="utf-8")
         self.assertIn('Join-Path $distDir "settings"', text)
         self.assertIn("Copy-Item -LiteralPath $settingsPath", text)
+
+    def test_package_script_defaults_to_existing_py39_runtime(self):
+        script_path = WORKSPACE_ROOT / "tools" / "package_pywrapper_server.ps1"
+
+        self.assertTrue(script_path.exists(), script_path)
+        text = script_path.read_text(encoding="utf-8")
+        self.assertIn(r"D:\miniconda3\envs\houyang\python.exe", text)
+        self.assertNotIn(r"D:\miniconda3\envs\py39\python.exe", text)
 
     def test_package_script_copies_release_files_into_ocrserver(self):
         script_path = WORKSPACE_ROOT / "tools" / "package_pywrapper_server.ps1"

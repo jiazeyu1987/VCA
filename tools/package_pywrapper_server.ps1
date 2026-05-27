@@ -24,7 +24,7 @@ $deployToVeinMain = $env:DEPLOY_TO_VEIN_MAIN
 $veinOcrServerDir = Join-Path $veinMainDir "OCRSERVER"
 
 if (-not $env:PYTHON_EXE -or [string]::IsNullOrWhiteSpace($env:PYTHON_EXE)) {
-    $env:PYTHON_EXE = "D:\miniconda3\envs\py39\python.exe"
+    $env:PYTHON_EXE = "D:\miniconda3\envs\houyang\python.exe"
 }
 $pythonExe = $env:PYTHON_EXE
 
