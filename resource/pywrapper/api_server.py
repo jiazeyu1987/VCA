@@ -48,6 +48,12 @@ PROVIDER_FIELDS = (
     "mode",
 )
 SCREENSHOT_LOCK = threading.Lock()
+ROI1_MARKER_COLOR = (255, 0, 0)
+ROI2_MARKER_COLOR = (0, 255, 0)
+ROI3_MARKER_COLOR = (255, 255, 0)
+FOCUS_MARKER_COLOR = (128, 0, 128)
+DIFFER_MARKER_WIDTH = 3
+FOCUS_MARKER_RADIUS = 3
 
 
 class StateInfo(ctypes.Structure):
@@ -486,6 +492,55 @@ def positive_diff_image(before: np.ndarray, after: np.ndarray) -> np.ndarray:
     return diff.astype(np.uint8)
 
 
+def draw_marker_rect(
+    draw: ImageDraw.ImageDraw,
+    image_size: Tuple[int, int],
+    rect: Tuple[int, int, int, int],
+    color: Tuple[int, int, int],
+) -> None:
+    width, height = image_size
+    if width <= 0 or height <= 0:
+        raise ValueError(f"cannot draw marker on empty image size={image_size}")
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"invalid marker rect={rect}")
+    if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+        raise ValueError(f"marker rect outside image bounds rect={rect} size={image_size}")
+    left = x1
+    top = y1
+    right = x2 - 1
+    bottom = y2 - 1
+    draw.rectangle((left, top, right, bottom), outline=color, width=DIFFER_MARKER_WIDTH)
+
+
+def draw_focus_marker(
+    draw: ImageDraw.ImageDraw,
+    image_size: Tuple[int, int],
+    focus_anchor: Tuple[int, int],
+) -> None:
+    width, height = image_size
+    x, y = [int(v) for v in focus_anchor]
+    if x < 0 or y < 0 or x >= width or y >= height:
+        raise ValueError(f"focus marker outside image bounds focus={focus_anchor} size={image_size}")
+    radius = FOCUS_MARKER_RADIUS
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=FOCUS_MARKER_COLOR)
+
+
+def draw_differ_roi_markers(
+    draw: ImageDraw.ImageDraw,
+    image_size: Tuple[int, int],
+    session: "OfflineSession",
+) -> None:
+    width, height = image_size
+    draw_marker_rect(draw, image_size, (0, 0, width, height), ROI1_MARKER_COLOR)
+    if session.roi2_rect is not None:
+        draw_marker_rect(draw, image_size, session.roi2_rect, ROI2_MARKER_COLOR)
+    if session.roi3_rect is not None:
+        draw_marker_rect(draw, image_size, session.roi3_rect, ROI3_MARKER_COLOR)
+    if session.focus_anchor is not None:
+        draw_focus_marker(draw, image_size, session.focus_anchor)
+
+
 def format_frame_timestamp(ts: float) -> str:
     return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d_%H-%M-%S.%f")[:-3]
 
@@ -537,48 +592,46 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
     if session.before is None or session.after is None:
         return None
     diff = positive_diff_image(session.before, session.after)
+    rgb = np.asarray(diff, dtype=np.uint8)
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb, rgb, rgb], axis=2)
+    image = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(image)
     try:
-        rgb = np.asarray(diff, dtype=np.uint8)
-        if rgb.ndim == 2:
-            rgb = np.stack([rgb, rgb, rgb], axis=2)
-        image = Image.fromarray(rgb)
-        draw = ImageDraw.Draw(image)
-        try:
-            font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 18)
-        except Exception:
-            try:
-                font = ImageFont.load_default()
-            except Exception:
-                font = None
-
-        color = "green" if str(session.final_roi2_color).strip().lower() == "green" else "red"
-        thr = float(config.difference_threshold) if config.difference_threshold is not None else None
-        lines = [
-            f"1. {'OK' if color == 'green' else 'FAIL'}",
-            "2. ROI2: diff/threshold=N/A"
-            if session.roi2_diff is None or thr is None
-            else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
-            "3. ROI3(G1/G2): N/A"
-            if session.roi3_g1 is None or session.roi3_g2 is None
-            else f"3. ROI3: G1={float(session.roi3_g1):.2f} G2={float(session.roi3_g2):.2f}",
-            "4. ROI3(colDiff): N/A"
-            if session.roi3_column_diff is None
-            else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
-        ]
-        line_ok = [
-            color == "green",
-            bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr)),
-            bool(session.roi3_override_method == "roi3_g1_g2"),
-            bool(session.roi3_override_method == "roi3_column_diff"),
-        ]
-        y = 20
-        for idx, line in enumerate(lines):
-            fill = (0, 200, 0) if line_ok[idx] else (255, 0, 0)
-            draw.text((20, y), line, fill=fill, font=font)
-            y += 20
-        return np.array(image)
+        font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 18)
     except Exception:
-        return diff
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+
+    color = "green" if str(session.final_roi2_color).strip().lower() == "green" else "red"
+    thr = float(config.difference_threshold) if config.difference_threshold is not None else None
+    lines = [
+        f"1. {'OK' if color == 'green' else 'FAIL'}",
+        "2. ROI2: diff/threshold=N/A"
+        if session.roi2_diff is None or thr is None
+        else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
+        "3. ROI3(G1/G2): N/A"
+        if session.roi3_g1 is None or session.roi3_g2 is None
+        else f"3. ROI3: G1={float(session.roi3_g1):.2f} G2={float(session.roi3_g2):.2f}",
+        "4. ROI3(colDiff): N/A"
+        if session.roi3_column_diff is None
+        else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
+    ]
+    line_ok = [
+        color == "green",
+        bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr)),
+        bool(session.roi3_override_method == "roi3_g1_g2"),
+        bool(session.roi3_override_method == "roi3_column_diff"),
+    ]
+    y = 20
+    for idx, line in enumerate(lines):
+        fill = (0, 200, 0) if line_ok[idx] else (255, 0, 0)
+        draw.text((20, y), line, fill=fill, font=font)
+        y += 20
+    draw_differ_roi_markers(draw, image.size, session)
+    return np.array(image)
 
 
 class DebugFrameSaver:

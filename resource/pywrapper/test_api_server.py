@@ -785,6 +785,39 @@ class ApiServerTests(unittest.TestCase):
             )
             self.assertFalse(np.array_equal(actual, raw))
 
+    def test_offline_diff_image_draws_roi_and_focus_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((160, 160, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((160, 160, 3), 30, dtype=np.uint8), 2, 2.0),
+                ]
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(80, 90)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 10, "right": 10, "top": 6, "bottom": 6},
+                    roi3_extension_params={"left": 20, "right": 20, "top": 15, "bottom": 15},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=None,
+                ),
+                logger=self.make_null_logger("test_offline_diff_image_draws_roi_and_focus_markers"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            actual = np.array(api_server.Image.open(Path(stop["diff_path"])))
+            self.assertEqual(tuple(actual[0, 0]), (255, 0, 0))
+            self.assertEqual(tuple(actual[84, 80]), (0, 255, 0))
+            self.assertEqual(tuple(actual[75, 80]), (255, 255, 0))
+            self.assertEqual(tuple(actual[90, 80]), (128, 0, 128))
+
     def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
         before = np.zeros((4, 4, 4), dtype=np.uint8)
         after = np.zeros((4, 4, 4), dtype=np.uint8)
