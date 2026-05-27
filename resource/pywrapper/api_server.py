@@ -588,6 +588,31 @@ def write_jsonl_line(path: Path, payload: dict) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def build_diff_overlay_judgement_lines(session: "OfflineSession", config: OfflineConfig):
+    color = "green" if str(session.final_roi2_color).strip().lower() == "green" else "red"
+    success_color = "green"
+    thr = float(config.difference_threshold) if config.difference_threshold is not None else None
+    lines = [
+        f"1. Result: {color}/{success_color}",
+        "2. ROI2: diff/threshold=N/A"
+        if session.roi2_diff is None or thr is None
+        else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
+        "3. ROI3(G1/G2): N/A"
+        if session.roi3_g1 is None or session.roi3_g2 is None
+        else f"3. ROI3: G1={float(session.roi3_g1):.2f} G2={float(session.roi3_g2):.2f}",
+        "4. ROI3(colDiff): N/A"
+        if session.roi3_column_diff is None
+        else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
+    ]
+    line_ok = [
+        color == success_color,
+        bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr)),
+        bool(session.roi3_override_method == "roi3_g1_g2"),
+        bool(session.roi3_override_method == "roi3_column_diff"),
+    ]
+    return lines, line_ok
+
+
 def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -> Optional[np.ndarray]:
     if session.before is None or session.after is None:
         return None
@@ -605,26 +630,7 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
         except Exception:
             font = None
 
-    color = "green" if str(session.final_roi2_color).strip().lower() == "green" else "red"
-    thr = float(config.difference_threshold) if config.difference_threshold is not None else None
-    lines = [
-        f"1. {'OK' if color == 'green' else 'FAIL'}",
-        "2. ROI2: diff/threshold=N/A"
-        if session.roi2_diff is None or thr is None
-        else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
-        "3. ROI3(G1/G2): N/A"
-        if session.roi3_g1 is None or session.roi3_g2 is None
-        else f"3. ROI3: G1={float(session.roi3_g1):.2f} G2={float(session.roi3_g2):.2f}",
-        "4. ROI3(colDiff): N/A"
-        if session.roi3_column_diff is None
-        else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
-    ]
-    line_ok = [
-        color == "green",
-        bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr)),
-        bool(session.roi3_override_method == "roi3_g1_g2"),
-        bool(session.roi3_override_method == "roi3_column_diff"),
-    ]
+    lines, line_ok = build_diff_overlay_judgement_lines(session, config)
     y = 20
     for idx, line in enumerate(lines):
         fill = (0, 200, 0) if line_ok[idx] else (255, 0, 0)

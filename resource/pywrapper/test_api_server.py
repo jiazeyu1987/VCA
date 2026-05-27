@@ -785,6 +785,34 @@ class ApiServerTests(unittest.TestCase):
             )
             self.assertFalse(np.array_equal(actual, raw))
 
+    def test_diff_overlay_first_line_shows_actual_and_success_value(self):
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.final_roi2_color = "red"
+
+        lines, line_ok = api_server.build_diff_overlay_judgement_lines(
+            session,
+            api_server.OfflineConfig(difference_threshold=5.0),
+        )
+
+        self.assertEqual(lines[0], "1. Result: red/green")
+        self.assertFalse(line_ok[0])
+        self.assertNotIn("OK", lines[0])
+        self.assertNotIn("FAIL", lines[0])
+
+        session.final_roi2_color = "green"
+        lines, line_ok = api_server.build_diff_overlay_judgement_lines(
+            session,
+            api_server.OfflineConfig(difference_threshold=5.0),
+        )
+
+        self.assertEqual(lines[0], "1. Result: green/green")
+        self.assertTrue(line_ok[0])
+
     def test_offline_diff_image_draws_roi_and_focus_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
             frames = self.SequenceFrameSource(
