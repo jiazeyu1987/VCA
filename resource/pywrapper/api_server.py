@@ -589,11 +589,15 @@ def write_jsonl_line(path: Path, payload: dict) -> None:
 
 
 def build_diff_overlay_judgement_lines(session: "OfflineSession", config: OfflineConfig):
-    color = "green" if str(session.final_roi2_color).strip().lower() == "green" else "red"
-    success_color = "green"
     thr = float(config.difference_threshold) if config.difference_threshold is not None else None
+    roi2_ok = bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr))
+    first_line = (
+        "1. ROI2: current=N/A / threshold=N/A"
+        if session.roi2_diff is None or thr is None
+        else f"1. ROI2: current={float(session.roi2_diff):.3f} / threshold={float(thr):.3f}"
+    )
     lines = [
-        f"1. Result: {color}/{success_color}",
+        first_line,
         "2. ROI2: diff/threshold=N/A"
         if session.roi2_diff is None or thr is None
         else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
@@ -605,8 +609,8 @@ def build_diff_overlay_judgement_lines(session: "OfflineSession", config: Offlin
         else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
     ]
     line_ok = [
-        color == success_color,
-        bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr)),
+        roi2_ok,
+        roi2_ok,
         bool(session.roi3_override_method == "roi3_g1_g2"),
         bool(session.roi3_override_method == "roi3_column_diff"),
     ]

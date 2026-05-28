@@ -792,26 +792,35 @@ class ApiServerTests(unittest.TestCase):
             is_save=True,
             stop_event=threading.Event(),
         )
-        session.final_roi2_color = "red"
+        session.roi2_diff = 2.0
 
         lines, line_ok = api_server.build_diff_overlay_judgement_lines(
             session,
             api_server.OfflineConfig(difference_threshold=5.0),
         )
 
-        self.assertEqual(lines[0], "1. Result: red/green")
+        self.assertEqual(lines[0], "1. ROI2: current=2.000 / threshold=5.000")
         self.assertFalse(line_ok[0])
         self.assertNotIn("OK", lines[0])
         self.assertNotIn("FAIL", lines[0])
 
-        session.final_roi2_color = "green"
+        session.roi2_diff = 8.0
         lines, line_ok = api_server.build_diff_overlay_judgement_lines(
             session,
             api_server.OfflineConfig(difference_threshold=5.0),
         )
 
-        self.assertEqual(lines[0], "1. Result: green/green")
+        self.assertEqual(lines[0], "1. ROI2: current=8.000 / threshold=5.000")
         self.assertTrue(line_ok[0])
+
+        session.roi2_diff = None
+        lines, line_ok = api_server.build_diff_overlay_judgement_lines(
+            session,
+            api_server.OfflineConfig(difference_threshold=5.0),
+        )
+
+        self.assertEqual(lines[0], "1. ROI2: current=N/A / threshold=N/A")
+        self.assertFalse(line_ok[0])
 
     def test_offline_diff_image_draws_roi_and_focus_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
