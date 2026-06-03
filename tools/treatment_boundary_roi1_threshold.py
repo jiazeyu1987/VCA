@@ -15,6 +15,10 @@ METHOD = "roi1_full_frame_gray_threshold"
 FRAME_NAME_RE = re.compile(r"^(\d{5})_.*_(before|frame)\.png$")
 DEFAULT_BASELINE_COUNT = 6
 DEFAULT_THRESHOLD_OFFSET = 25.0
+DEFAULT_MAX_INACTIVE_GAP = 1
+DEFAULT_ACTIVE_EXTENSION_OFFSET = 9.0
+DEFAULT_RETURN_TO_BASELINE_OFFSET = 5.0
+DEFAULT_BOUNDARY_OFFSET = 2
 
 
 class BoundaryDetectionError(RuntimeError):
@@ -58,19 +62,33 @@ def calculate_mean_gray(path: Path) -> float:
     return float(np.mean(gray))
 
 
-def find_single_active_interval(active_flags: list[bool]) -> tuple[int, int]:
+def find_single_active_interval(
+    active_flags: list[bool],
+    max_inactive_gap: int = DEFAULT_MAX_INACTIVE_GAP,
+) -> tuple[int, int]:
+    if max_inactive_gap < 0:
+        raise BoundaryDetectionError("max_inactive_gap must be greater than or equal to 0")
+
     intervals: list[tuple[int, int]] = []
     start: Optional[int] = None
+    inactive_run = 0
 
     for index, is_active in enumerate(active_flags):
         if is_active and start is None:
             start = index
+            inactive_run = 0
+        elif is_active and start is not None:
+            inactive_run = 0
         elif not is_active and start is not None:
-            intervals.append((start, index - 1))
-            start = None
+            inactive_run += 1
+            if inactive_run > max_inactive_gap:
+                intervals.append((start, index - inactive_run))
+                start = None
+                inactive_run = 0
 
     if start is not None:
-        intervals.append((start, len(active_flags) - 1))
+        tail_trim = inactive_run if inactive_run > 0 else 0
+        intervals.append((start, len(active_flags) - 1 - tail_trim))
 
     if len(intervals) != 1:
         raise BoundaryDetectionError(
@@ -90,9 +108,15 @@ def analyze_folder(
     folder: str | Path,
     baseline_count: int = DEFAULT_BASELINE_COUNT,
     threshold_offset: float = DEFAULT_THRESHOLD_OFFSET,
+    max_inactive_gap: int = DEFAULT_MAX_INACTIVE_GAP,
+    active_extension_offset: float = DEFAULT_ACTIVE_EXTENSION_OFFSET,
+    return_to_baseline_offset: float = DEFAULT_RETURN_TO_BASELINE_OFFSET,
+    boundary_offset: int = DEFAULT_BOUNDARY_OFFSET,
 ) -> dict[str, object]:
     if baseline_count <= 0:
         raise BoundaryDetectionError("baseline_count must be greater than 0")
+    if boundary_offset <= 0:
+        raise BoundaryDetectionError("boundary_offset must be greater than 0")
 
     folder_path = Path(folder).expanduser().resolve()
     frames = collect_frame_paths(folder_path)
@@ -105,21 +129,45 @@ def analyze_folder(
     baseline_values = np.asarray(mean_grays[:baseline_count], dtype=np.float64)
     baseline = float(np.median(baseline_values))
     active_threshold = float(baseline + threshold_offset)
+    active_extension_threshold = float(baseline + active_extension_offset)
+    return_to_baseline_threshold = float(baseline + return_to_baseline_offset)
     active_flags = [mean_gray >= active_threshold for mean_gray in mean_grays]
-    active_start, active_end = find_single_active_interval(active_flags)
+    active_start, active_end = find_single_active_interval(active_flags, max_inactive_gap=max_inactive_gap)
+
+    while active_start > 0 and mean_grays[active_start - 1] >= active_extension_threshold:
+        active_start -= 1
+    while active_end + 1 < len(mean_grays) and mean_grays[active_end + 1] >= return_to_baseline_threshold:
+        active_end += 1
+    before_index = active_start - int(boundary_offset)
+    after_index = active_end + int(boundary_offset)
+    after_fallback_used = False
+    if before_index < 0:
+        raise BoundaryDetectionError(
+            f"active interval does not have boundary frame offset {boundary_offset} before it"
+        )
+    if after_index >= len(frames):
+        after_index = len(frames) - 1
+        after_fallback_used = True
 
     return {
         "method": METHOD,
         "folder": str(folder_path),
-        "before_frame": frames[active_start - 1].name,
-        "after_frame": frames[active_end + 1].name,
+        "before_frame": frames[before_index].name,
+        "after_frame": frames[after_index].name,
         "active_start_frame": frames[active_start].name,
         "active_end_frame": frames[active_end].name,
         "frame_count": len(frames),
         "baseline": baseline,
         "baseline_count": baseline_count,
         "threshold_offset": float(threshold_offset),
+        "max_inactive_gap": int(max_inactive_gap),
         "active_threshold": active_threshold,
+        "active_extension_offset": float(active_extension_offset),
+        "active_extension_threshold": active_extension_threshold,
+        "return_to_baseline_offset": float(return_to_baseline_offset),
+        "return_to_baseline_threshold": return_to_baseline_threshold,
+        "boundary_offset": int(boundary_offset),
+        "after_fallback_used": bool(after_fallback_used),
     }
 
 
@@ -159,6 +207,42 @@ def build_argument_parser() -> argparse.ArgumentParser:
             f"Default: {DEFAULT_THRESHOLD_OFFSET}."
         ),
     )
+    parser.add_argument(
+        "--max-inactive-gap",
+        type=int,
+        default=DEFAULT_MAX_INACTIVE_GAP,
+        help=(
+            "Maximum number of consecutive inactive frames allowed inside one active interval. "
+            f"Default: {DEFAULT_MAX_INACTIVE_GAP}."
+        ),
+    )
+    parser.add_argument(
+        "--active-extension-offset",
+        type=float,
+        default=DEFAULT_ACTIVE_EXTENSION_OFFSET,
+        help=(
+            "Additional gray-mean offset above baseline used to extend the active interval backward "
+            f"before the peak core. Default: {DEFAULT_ACTIVE_EXTENSION_OFFSET}."
+        ),
+    )
+    parser.add_argument(
+        "--return-to-baseline-offset",
+        type=float,
+        default=DEFAULT_RETURN_TO_BASELINE_OFFSET,
+        help=(
+            "Maximum gray-mean offset above baseline that marks the return to baseline after treatment. "
+            f"Default: {DEFAULT_RETURN_TO_BASELINE_OFFSET}."
+        ),
+    )
+    parser.add_argument(
+        "--boundary-offset",
+        type=int,
+        default=DEFAULT_BOUNDARY_OFFSET,
+        help=(
+            "Number of raw sequence frames to step outside the detected active interval for before/after selection. "
+            f"Default: {DEFAULT_BOUNDARY_OFFSET}."
+        ),
+    )
     return parser
 
 
@@ -172,6 +256,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             folder,
             baseline_count=args.baseline_count,
             threshold_offset=args.threshold_offset,
+            max_inactive_gap=args.max_inactive_gap,
+            active_extension_offset=args.active_extension_offset,
+            return_to_baseline_offset=args.return_to_baseline_offset,
+            boundary_offset=args.boundary_offset,
         )
     except BoundaryDetectionError as error:
         print(f"error: {error}", file=sys.stderr)

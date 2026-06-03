@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -566,12 +566,14 @@ class ApiServerTests(unittest.TestCase):
             [
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 4, 4.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 5, 5.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 7, 7.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 200, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 24, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 7, 7.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 9, 9.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 10, 10.0),
             ]
         )
         manager = api_server.OfflineSessionManager(
@@ -597,7 +599,7 @@ class ApiServerTests(unittest.TestCase):
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
         self.assertEqual(stop["info"], "offline_stop_completed")
-        self.assertEqual(stop["roi2_before_mean"], 10.0)
+        self.assertEqual(stop["roi2_before_mean"], 11.0)
         self.assertEqual(stop["roi2_after_mean"], 14.0)
         self.assertEqual(stop["roi2_color"], "red")
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
@@ -608,12 +610,13 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 4, 4.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 65, dtype=np.uint8), 5, 5.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 6, 6.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 13, dtype=np.uint8), 7, 7.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 8, 8.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 200, dtype=np.uint8), 9, 9.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 24, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 65, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 7, 7.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 13, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 9, 9.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 10, 10.0),
             ]
         )
         manager = api_server.OfflineSessionManager(
@@ -644,6 +647,47 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(stop["roi2_after_mean"], 14.0)
         self.assertEqual(stop["roi2_diff"], 3.0)
         self.assertEqual(stop["roi2_color"], "green")
+        self.assertEqual(stop["after_method"], "roi1_boundary_after2")
+
+    def test_offline_peak_selection_extends_shoulders_before_selecting_second_boundary_frames(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 19, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 22, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 35, dtype=np.uint8), 7, 7.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 18, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 16, dtype=np.uint8), 9, 9.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 10, 10.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 11, 11.0),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=20.0,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=5.0,
+                stop_wait_timeout_seconds=2.0,
+            ),
+            logger=self.make_null_logger("test_offline_peak_selection_extends_shoulders_before_selecting_second_boundary_frames"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.15)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_before_mean"], 10.0)
+        self.assertEqual(stop["roi2_after_mean"], 10.0)
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
 
     def test_offline_peak_selection_fails_without_second_before_boundary_frame(self):
@@ -677,9 +721,59 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertFalse(stop["success"])
         self.assertEqual(stop["info"], "error_in_detect")
-        self.assertIn("at least two low frames before", stop["error"])
+        self.assertIn("at least two frames before", stop["error"])
 
-    def test_offline_peak_selection_fails_without_second_after_boundary_frame(self):
+    def test_offline_peak_failure_still_saves_img_and_tmp_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+                ]
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    offline_peak_end_diff_threshold=7.0,
+                    roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                    roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                    difference_threshold=2.0,
+                    debug_save_enabled=True,
+                    debug_save_dir=tmp,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_peak_failure_still_saves_img_and_tmp_artifacts"),
+            )
+
+            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.1)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertFalse(stop["success"])
+            self.assertEqual(stop["info"], "error_in_detect")
+            self.assertIn("before_path", stop)
+            self.assertIn("after_path", stop)
+            self.assertIn("diff_path", stop)
+            self.assertIn("debug_dir", stop)
+            self.assertTrue(Path(stop["before_path"]).exists())
+            self.assertTrue(Path(stop["after_path"]).exists())
+            self.assertTrue(Path(stop["diff_path"]).exists())
+            debug_dir = Path(start["debug_dir"])
+            self.assertEqual(debug_dir, Path(stop["debug_dir"]))
+            self.assertTrue((debug_dir / "final_before.png").exists())
+            self.assertTrue((debug_dir / "final_after.png").exists())
+            self.assertTrue((debug_dir / "meta.json").exists())
+
+    def test_offline_peak_selection_falls_back_to_last_frame_when_second_after_boundary_frame_is_missing(self):
         frames = self.SequenceFrameSource(
             [
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
@@ -701,16 +795,16 @@ class ApiServerTests(unittest.TestCase):
                 difference_threshold=2.0,
                 stop_wait_timeout_seconds=2.0,
             ),
-            logger=self.make_null_logger("test_offline_peak_selection_fails_without_second_after_boundary_frame"),
+            logger=self.make_null_logger("test_offline_peak_selection_falls_back_to_last_frame_when_second_after_boundary_frame_is_missing"),
         )
 
         manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
         time.sleep(0.1)
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
-        self.assertFalse(stop["success"])
-        self.assertEqual(stop["info"], "error_in_detect")
-        self.assertIn("at least two low frames after", stop["error"])
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_after_mean"], 12.0)
+        self.assertEqual(stop["after_method"], "roi1_boundary_after2_fallback_last")
 
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
@@ -860,8 +954,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag before_captured:", log_text)
         self.assertIn("OFFLINE diag peak_threshold_initialized:", log_text)
         self.assertIn("OFFLINE diag before_selected:", log_text)
-        self.assertIn("OFFLINE diag peak_enter_high:", log_text)
-        self.assertIn("OFFLINE diag peak_end_detected:", log_text)
+        self.assertIn("OFFLINE diag roi1_boundary_interval_selected:", log_text)
         self.assertIn("OFFLINE diag after_selected:", log_text)
         self.assertIn('"before_method": "roi1_boundary_before2"', log_text)
         self.assertIn('"after_method": "roi1_boundary_after2"', log_text)
@@ -1030,6 +1123,151 @@ class ApiServerTests(unittest.TestCase):
             self.assertIn("OFFLINE diag final_outputs_saved:", log_text)
             self.assertIn('"meta_jsonl":', log_text)
             self.assertIn('"diff_path":', log_text)
+
+    def test_offline_save_updates_db_image_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_save_updates_db_image_paths"),
+            )
+
+            with patch("api_server.update_segment_images_info") as update_mock:
+                manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+                time.sleep(0.05)
+                stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertEqual(stop["info"], "offline_stop_completed")
+            update_mock.assert_called_once()
+            db_root_arg, point_id_arg, before_path_arg, after_path_arg = update_mock.call_args.args
+            self.assertEqual(db_root_arg, tmp)
+            self.assertEqual(point_id_arg, 123)
+            self.assertEqual(before_path_arg, stop["before_path"])
+            self.assertEqual(after_path_arg, stop["after_path"])
+            self.assertTrue(Path(stop["before_path"]).exists())
+            self.assertTrue(Path(stop["after_path"]).exists())
+            self.assertTrue(Path(stop["diff_path"]).exists())
+
+    def test_offline_db_update_failure_returns_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_db_update_failure_returns_error"),
+            )
+
+            with patch("api_server.update_segment_images_info", side_effect=RuntimeError("db write blocked")):
+                manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+                time.sleep(0.05)
+                stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertFalse(stop["success"])
+            self.assertEqual(stop["info"], "db_update_failed")
+            self.assertIn("db write blocked", stop["error"])
+
+    def test_offline_db_update_failure_still_saves_debug_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    debug_save_enabled=True,
+                    debug_save_dir=tmp,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_db_update_failure_still_saves_debug_artifacts"),
+            )
+
+            with patch("api_server.update_segment_images_info", side_effect=RuntimeError("db write blocked")):
+                start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+                time.sleep(0.05)
+                stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertFalse(stop["success"])
+            self.assertEqual(stop["info"], "db_update_failed")
+            debug_dir = Path(start["debug_dir"])
+            self.assertEqual(debug_dir, Path(stop["debug_dir"]))
+            self.assertTrue((debug_dir / "final_before.png").exists())
+            self.assertTrue((debug_dir / "final_after.png").exists())
+            self.assertTrue((debug_dir / "meta.json").exists())
+
+    def test_offline_detect_failure_still_attempts_db_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    offline_peak_end_diff_threshold=7.0,
+                    roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                    roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                    difference_threshold=2.0,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_detect_failure_still_attempts_db_update"),
+            )
+
+            with patch("api_server.update_segment_images_info") as update_mock:
+                manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+                time.sleep(0.1)
+                stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertFalse(stop["success"])
+            self.assertEqual(stop["info"], "error_in_detect")
+            update_mock.assert_called_once()
+            self.assertEqual(update_mock.call_args.args[1], 123)
+            self.assertEqual(update_mock.call_args.args[2], stop["before_path"])
+            self.assertEqual(update_mock.call_args.args[3], stop["after_path"])
 
     def test_offline_red_path_logs_decision_details(self):
         logger, stream = self.make_stream_logger("test_offline_red_path_logs_decision_details")
