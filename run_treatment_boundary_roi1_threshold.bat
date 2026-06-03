@@ -2,9 +2,7 @@
 setlocal EnableExtensions
 
 set "ROOT_DIR=%~dp0"
-set "SCRIPT_PATH=%ROOT_DIR%tools\treatment_boundary_roi1_threshold.py"
-set "FOLDER=%~1"
-if "%FOLDER%"=="" set "FOLDER=E:\TestData\107969_20260601_171819_175"
+set "SCRIPT_PATH=%ROOT_DIR%tools\treatment_boundary_roi1_threshold_gui.py"
 
 if defined PYTHON_EXE (
     set "PYTHON_CMD=%PYTHON_EXE%"
@@ -26,11 +24,6 @@ if not exist "%SCRIPT_PATH%" (
     exit /b 1
 )
 
-if not exist "%FOLDER%\" (
-    echo [ERROR] Folder not found: %FOLDER%
-    exit /b 2
-)
-
 set "PYTHONDONTWRITEBYTECODE=1"
-"%PYTHON_CMD%" "%SCRIPT_PATH%" --folder "%FOLDER%"
+"%PYTHON_CMD%" "%SCRIPT_PATH%"
 exit /b %ERRORLEVEL%
