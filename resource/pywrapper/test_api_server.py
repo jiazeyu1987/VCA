@@ -1,6 +1,7 @@
 import json
 import logging
 import errno
+import sqlite3
 from io import StringIO
 from pathlib import Path
 import tempfile
@@ -83,6 +84,49 @@ class ApiServerTests(unittest.TestCase):
         handler.setFormatter(logging.Formatter("%(levelname)s:%(message)s"))
         logger.addHandler(handler)
         return logger, stream
+
+    def create_segment_images_db_pair(self, root_dir: str, point_id: int = 123) -> None:
+        for db_name in ("ccwssm", "zccwssm"):
+            conn = sqlite3.connect(str(Path(root_dir) / db_name))
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE SegmentImagesInfo (
+                        ID INTEGER PRIMARY KEY,
+                        PointID INTEGER,
+                        ImagePath VARCHAR(500),
+                        TreatFlag TINYINT DEFAULT 0,
+                        ErrorFlag TINYINT DEFAULT 0,
+                        ModifyTime VARCHAR(100)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO SegmentImagesInfo
+                        (ID, PointID, ImagePath, TreatFlag, ErrorFlag, ModifyTime)
+                    VALUES (?, ?, '', 0, 0, '')
+                    """,
+                    (point_id, point_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def read_segment_treat_flags(self, root_dir: str, point_id: int = 123) -> dict[str, int]:
+        flags: dict[str, int] = {}
+        for db_name in ("ccwssm", "zccwssm"):
+            conn = sqlite3.connect(str(Path(root_dir) / db_name))
+            try:
+                row = conn.execute(
+                    "SELECT TreatFlag FROM SegmentImagesInfo WHERE ID = ?",
+                    (point_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertIsNotNone(row, db_name)
+            flags[db_name] = int(row[0])
+        return flags
 
     def test_parse_request_accepts_existing_protocol(self):
         parsed = api_server.parse_request('ONLINE;31415;{"point_id": 123}')
@@ -1153,14 +1197,46 @@ class ApiServerTests(unittest.TestCase):
 
             self.assertEqual(stop["info"], "offline_stop_completed")
             update_mock.assert_called_once()
-            db_root_arg, point_id_arg, before_path_arg, after_path_arg = update_mock.call_args.args
+            db_root_arg, point_id_arg, before_path_arg, after_path_arg, treatment_ok_arg = update_mock.call_args.args
             self.assertEqual(db_root_arg, tmp)
             self.assertEqual(point_id_arg, 123)
             self.assertEqual(before_path_arg, stop["before_path"])
             self.assertEqual(after_path_arg, stop["after_path"])
+            self.assertTrue(treatment_ok_arg)
             self.assertTrue(Path(stop["before_path"]).exists())
             self.assertTrue(Path(stop["after_path"]).exists())
             self.assertTrue(Path(stop["diff_path"]).exists())
+
+    def test_offline_green_save_updates_db_treat_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.create_segment_images_db_pair(tmp)
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_green_save_updates_db_treat_flag"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertEqual(stop["info"], "offline_stop_completed")
+            self.assertEqual(stop["roi2_color"], "green")
+            self.assertEqual(self.read_segment_treat_flags(tmp), {"ccwssm": 1, "zccwssm": 1})
 
     def test_offline_db_update_failure_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1268,6 +1344,7 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(update_mock.call_args.args[1], 123)
             self.assertEqual(update_mock.call_args.args[2], stop["before_path"])
             self.assertEqual(update_mock.call_args.args[3], stop["after_path"])
+            self.assertIsInstance(update_mock.call_args.args[4], bool)
 
     def test_offline_red_path_logs_decision_details(self):
         logger, stream = self.make_stream_logger("test_offline_red_path_logs_decision_details")

@@ -561,23 +561,24 @@ def write_result_flag(path_text: Optional[str], ok: bool) -> None:
     os.replace(tmp_path, out_path)
 
 
-def update_segment_images_info(db_root_dir: Optional[str], point_id, before_path: str, after_path: str) -> None:
+def update_segment_images_info(db_root_dir: Optional[str], point_id, before_path: str, after_path: str, treatment_ok: bool) -> None:
     if not db_root_dir:
         return
     db_root = Path(db_root_dir)
     db_paths = [db_root / "ccwssm", db_root / "zccwssm"]
     modify_time = datetime.now().strftime("%Y_%m_%d-%H_%M_%S_%f")[:-3]
     image_path = before_path + ";" + after_path + ";" + after_path.replace("_after", "_diff")
+    treat_flag = 1 if treatment_ok else 0
     sql = """
         UPDATE SegmentImagesInfo
-        SET ImagePath = ?, ModifyTime = ?
+        SET ImagePath = ?, TreatFlag = ?, ModifyTime = ?
         WHERE ID = ?
     """
     for db_path in db_paths:
         conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         try:
             cur = conn.cursor()
-            cur.execute(sql, (image_path, modify_time, point_id))
+            cur.execute(sql, (image_path, treat_flag, modify_time, point_id))
             if cur.rowcount <= 0:
                 raise LookupError(f"SegmentImagesInfo update matched no rows in {db_path} for point_id={point_id}")
             conn.commit()
@@ -1723,7 +1724,13 @@ class OfflineSessionManager:
                 self._logger.exception("OFFLINE result flag write failed: point_id=%s", session.point_id)
             if session.is_save:
                 try:
-                    update_segment_images_info(self._config.db_root_dir, session.point_id, str(before_path), str(after_path))
+                    update_segment_images_info(
+                        self._config.db_root_dir,
+                        session.point_id,
+                        str(before_path),
+                        str(after_path),
+                        session.final_roi2_color == "green",
+                    )
                     self._offline_diag(
                         "db_update_completed",
                         point_id=session.point_id,
