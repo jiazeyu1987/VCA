@@ -1377,6 +1377,27 @@ class OfflineSessionManager:
         if len(session.frame_buffer) > limit:
             session.frame_buffer = session.frame_buffer[-limit:]
 
+    def _select_before_record_for_roi2(self, session: OfflineSession, record: OfflineFrameRecord, reason: str) -> None:
+        session.before = np.array(record.frame, copy=True)
+        session.before_seq = int(record.seq)
+        session.before_ts = float(record.ts)
+        session.before_name = format_frame_timestamp(record.ts)
+        if session.roi2_rect is None:
+            self._initialize_focus_and_rois(session, session.before)
+        session.before_mean = roi_gray_mean(session.before, session.roi2_rect) if session.roi2_rect is not None else None
+        self._offline_diag(
+            "before_selected",
+            point_id=session.point_id,
+            capture_source="image_matrix",
+            frame_index=int(record.frame_index),
+            frame_seq=int(record.seq),
+            frame_ts=round(float(record.ts), 6),
+            before_name=session.before_name,
+            before_method=reason,
+            roi1_gray=round(float(record.roi1_gray), 6),
+            roi2_before_mean=round(float(session.before_mean), 6) if session.before_mean is not None else None,
+        )
+
     def _initialize_focus_and_rois(self, session: OfflineSession, before_frame: np.ndarray) -> None:
         raw_provider = self._provider_fetcher()
         focus_point = raw_provider.get("focus_point") if isinstance(raw_provider, dict) else None
@@ -1485,7 +1506,12 @@ class OfflineSessionManager:
                     "roi3_mean": roi3_mean,
                 },
             )
-            if (not before_written) and record.tag == "before":
+            if (
+                (not before_written)
+                and session.before_seq is not None
+                and int(record.seq) == int(session.before_seq)
+                and (session.before_ts is None or abs(float(record.ts) - float(session.before_ts)) < 0.000001)
+            ):
                 write_jsonl_line(
                     meta_jsonl,
                     {
@@ -1494,6 +1520,7 @@ class OfflineSessionManager:
                         "point_id": session.point_id,
                         "frame_index": record.frame_index,
                         "ts": format_frame_timestamp(record.ts),
+                        "tag": record.tag,
                     },
                 )
                 before_written = True
@@ -1619,6 +1646,7 @@ class OfflineSessionManager:
         timed_out = False
         last_seq = None
         frame_index = 0
+        worker_error_response = None
         before_default = None
         before_default_seq = None
         before_default_ts = None
@@ -1629,6 +1657,7 @@ class OfflineSessionManager:
         peak_found = False
         after_target_frame = None
         prev_is_high = None
+        pre_active_low_records: list[OfflineFrameRecord] = []
         deadline_ts = time.time() + float(session.duration_s)
         self._offline_diag(
             "session_thread_enter",
@@ -1668,6 +1697,15 @@ class OfflineSessionManager:
                 frame_index += 1
                 frame_image = np.array(frame.image, copy=True)
                 roi1_gray = frame_gray_mean(frame_image)
+                frame_tag = "frame" if self._config.offline_peak_enabled else ("before" if frame_index == 1 else "frame")
+                frame_record = OfflineFrameRecord(
+                    np.array(frame_image, copy=True),
+                    int(frame.seq),
+                    float(frame.ts),
+                    int(frame_index),
+                    frame_tag,
+                    float(roi1_gray),
+                )
                 if before_default is None:
                     before_default = frame_image
                     before_default_seq = frame.seq
@@ -1704,18 +1742,23 @@ class OfflineSessionManager:
                             peak_threshold=round(float(peak_threshold), 6),
                             threshold_offset=round(float(self._config.offline_peak_threshold), 6) if self._config.offline_peak_threshold is not None else None,
                         )
-                self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, "before" if frame_index == 1 else "frame", roi1_gray)
+                self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, frame_record.tag, roi1_gray)
                 if not self._config.offline_peak_enabled or before_gray_mean is None:
                     time.sleep(0.01)
                     continue
                 if peak_threshold is None:
                     peak_threshold = float(before_gray_mean) + float(self._config.offline_peak_threshold or 0.0)
                 is_high = float(roi1_gray) >= float(peak_threshold)
+                if (not peak_found) and (not peak_in_high) and (not peak_in_descent) and (not is_high):
+                    pre_active_low_records.append(frame_record)
                 if prev_is_high is None:
                     prev_is_high = is_high
                     time.sleep(0.01)
                     continue
                 if (not peak_found) and (not peak_in_high) and (not peak_in_descent) and (not prev_is_high) and is_high:
+                    if len(pre_active_low_records) < 2:
+                        raise ValueError("OFFLINE requires at least two low frames before treatment high interval")
+                    self._select_before_record_for_roi2(session, pre_active_low_records[-2], "roi1_boundary_before2")
                     peak_in_high = True
                     self._offline_diag(
                         "peak_enter_high",
@@ -1741,7 +1784,7 @@ class OfflineSessionManager:
                     if abs(float(roi1_gray) - float(before_gray_mean)) <= float(self._config.offline_peak_end_diff_threshold):
                         peak_in_descent = False
                         peak_found = True
-                        after_target_frame = frame_index + max(0, int(self._config.offline_peak_after_delay_frames))
+                        after_target_frame = frame_index + 1
                         self._offline_diag(
                             "peak_end_detected",
                             point_id=session.point_id,
@@ -1752,14 +1795,15 @@ class OfflineSessionManager:
                             before_gray_mean=round(float(before_gray_mean), 6),
                             after_target_frame=int(after_target_frame),
                             end_diff_threshold=round(float(self._config.offline_peak_end_diff_threshold), 6),
+                            after_boundary="second_low_frame_after_treatment",
                         )
                 if peak_found and session.after is None and after_target_frame is not None and frame_index == after_target_frame:
                     session.after = frame_image
                     session.after_seq = frame.seq
                     session.after_ts = frame.ts
                     session.after_name = format_frame_timestamp(frame.ts)
-                    session.after_method = f"peak+{int(self._config.offline_peak_after_delay_frames)}"
-                    self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, "after_peak", roi1_gray)
+                    session.after_method = "roi1_boundary_after2"
+                    self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, "after_boundary2", roi1_gray)
                     self._offline_diag(
                         "after_selected",
                         point_id=session.point_id,
@@ -1775,9 +1819,21 @@ class OfflineSessionManager:
                 time.sleep(0.01)
         except Exception as exc:
             self._logger.exception("OFFLINE session worker failed: point_id=%s", session.point_id)
-            session.response = {"success": False, "info": "error_in_detect", "point_id": session.point_id, "error": str(exc)}
+            worker_error_response = {"success": False, "info": "error_in_detect", "point_id": session.point_id, "error": str(exc)}
         finally:
             session.capture_done_event.set()
+            if worker_error_response is not None:
+                session.response = worker_error_response
+                session.finished_event.set()
+                return
+            if self._config.offline_peak_enabled and session.after is None:
+                if peak_found:
+                    error = "OFFLINE requires at least two low frames after treatment high interval"
+                else:
+                    error = "OFFLINE requires one ROI1 treatment high interval before selecting boundary frames"
+                session.response = {"success": False, "info": "error_in_detect", "point_id": session.point_id, "error": error}
+                session.finished_event.set()
+                return
             if session.before is None and before_default is not None:
                 session.before = before_default
                 session.before_seq = before_default_seq

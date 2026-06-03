@@ -561,15 +561,15 @@ class ApiServerTests(unittest.TestCase):
         self.assertTrue(stop["roi3_override_applied"])
         self.assertEqual(stop["roi3_override_method"], "roi3_g1_g2")
 
-    def test_offline_peak_selection_uses_peak_after_frame_not_stop_frame(self):
+    def test_offline_peak_selection_uses_second_boundary_frames_not_stop_frame(self):
         frames = self.SequenceFrameSource(
             [
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 13, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 7, 7.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 200, dtype=np.uint8), 8, 8.0),
             ]
@@ -588,7 +588,7 @@ class ApiServerTests(unittest.TestCase):
                 difference_threshold=5.0,
                 stop_wait_timeout_seconds=2.0,
             ),
-            logger=self.make_null_logger("test_offline_peak_selection_uses_peak_after_frame_not_stop_frame"),
+            logger=self.make_null_logger("test_offline_peak_selection_uses_second_boundary_frames_not_stop_frame"),
         )
 
         start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
@@ -597,8 +597,120 @@ class ApiServerTests(unittest.TestCase):
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
         self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_before_mean"], 10.0)
         self.assertEqual(stop["roi2_after_mean"], 14.0)
         self.assertEqual(stop["roi2_color"], "red")
+        self.assertEqual(stop["after_method"], "roi1_boundary_after2")
+
+    def test_offline_peak_selection_uses_second_before_and_second_after_for_roi2(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 65, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 13, dtype=np.uint8), 7, 7.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 14, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 200, dtype=np.uint8), 9, 9.0),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                offline_peak_after_delay_frames=0,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=2.0,
+                stop_wait_timeout_seconds=2.0,
+                image_output_dir=None,
+            ),
+            logger=self.make_null_logger("test_offline_peak_selection_uses_second_before_and_second_after_for_roi2"),
+        )
+
+        start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        self.assertEqual(start["info"], "offline_started")
+        time.sleep(0.2)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_before_mean"], 11.0)
+        self.assertEqual(stop["roi2_after_mean"], 14.0)
+        self.assertEqual(stop["roi2_diff"], 3.0)
+        self.assertEqual(stop["roi2_color"], "green")
+        self.assertEqual(stop["after_method"], "roi1_boundary_after2")
+
+    def test_offline_peak_selection_fails_without_second_before_boundary_frame(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=2.0,
+                stop_wait_timeout_seconds=2.0,
+            ),
+            logger=self.make_null_logger("test_offline_peak_selection_fails_without_second_before_boundary_frame"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.1)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertFalse(stop["success"])
+        self.assertEqual(stop["info"], "error_in_detect")
+        self.assertIn("at least two low frames before", stop["error"])
+
+    def test_offline_peak_selection_fails_without_second_after_boundary_frame(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=2.0,
+                stop_wait_timeout_seconds=2.0,
+            ),
+            logger=self.make_null_logger("test_offline_peak_selection_fails_without_second_after_boundary_frame"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.1)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertFalse(stop["success"])
+        self.assertEqual(stop["info"], "error_in_detect")
+        self.assertIn("at least two low frames after", stop["error"])
 
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
@@ -671,10 +783,11 @@ class ApiServerTests(unittest.TestCase):
             frames = self.SequenceFrameSource(
                 [
                     api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 3, 3.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
                     api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
                 ]
             )
             manager = api_server.OfflineSessionManager(
@@ -715,10 +828,11 @@ class ApiServerTests(unittest.TestCase):
         frames = self.SequenceFrameSource(
             [
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 3, 3.0),
-                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
                 api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
             ]
         )
         manager = api_server.OfflineSessionManager(
@@ -745,10 +859,12 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag session_thread_enter:", log_text)
         self.assertIn("OFFLINE diag before_captured:", log_text)
         self.assertIn("OFFLINE diag peak_threshold_initialized:", log_text)
+        self.assertIn("OFFLINE diag before_selected:", log_text)
         self.assertIn("OFFLINE diag peak_enter_high:", log_text)
         self.assertIn("OFFLINE diag peak_end_detected:", log_text)
         self.assertIn("OFFLINE diag after_selected:", log_text)
-        self.assertIn('"after_method": "peak+1"', log_text)
+        self.assertIn('"before_method": "roi1_boundary_before2"', log_text)
+        self.assertIn('"after_method": "roi1_boundary_after2"', log_text)
 
     def test_offline_diff_image_contains_overlay_not_raw_positive_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -874,10 +990,11 @@ class ApiServerTests(unittest.TestCase):
             frames = self.SequenceFrameSource(
                 [
                     api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 2, 2.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 3, 3.0),
-                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
                     api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
                 ]
             )
             manager = api_server.OfflineSessionManager(
