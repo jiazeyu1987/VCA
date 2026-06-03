@@ -148,8 +148,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         folder = Path(args.folder) if args.folder else choose_folder_with_dialog()
         payload = analyze_folder(folder, min_jump=args.min_jump)
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
+    except BoundaryDetectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(payload, ensure_ascii=False))
     return 0
