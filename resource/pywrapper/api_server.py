@@ -112,6 +112,8 @@ class OfflineConfig:
     image_output_dir: Optional[str] = None
     db_root_dir: Optional[str] = None
     result_flag_path: Optional[str] = None
+    focus_guide_angle_degrees: float = GUIDE_LINE_ANGLE_DEGREES
+    focus_guide_line_width: int = GUIDE_LINE_WIDTH
 
     @staticmethod
     def default() -> "OfflineConfig":
@@ -574,26 +576,45 @@ def draw_focus_guide_lines(
     draw: ImageDraw.ImageDraw,
     image_size: Tuple[int, int],
     focus_anchor: Tuple[int, int],
+    angle_degrees: float,
+    line_width: int,
 ) -> None:
     x, y = validate_focus_anchor(image_size, focus_anchor)
-    half_angle = math.radians(GUIDE_LINE_ANGLE_DEGREES / 2.0)
+    guide_angle, guide_width = validate_focus_guide_geometry(angle_degrees, line_width)
+    half_angle = math.radians(guide_angle / 2.0)
     directions = (
         (-math.sin(half_angle), -math.cos(half_angle)),
         (math.sin(half_angle), -math.cos(half_angle)),
     )
     for direction in directions:
         end_x, end_y = clip_focus_guide_endpoint(image_size, (x, y), direction)
-        draw.line((x, y, end_x, end_y), fill=GUIDE_LINE_COLOR, width=GUIDE_LINE_WIDTH)
+        draw.line((x, y, end_x, end_y), fill=GUIDE_LINE_COLOR, width=guide_width)
 
 
-def render_frame_with_focus_guides(frame: np.ndarray, session: "OfflineSession") -> np.ndarray:
+def validate_focus_guide_geometry(angle_degrees, line_width) -> Tuple[float, int]:
+    guide_angle = float(angle_degrees)
+    guide_width = int(line_width)
+    if guide_angle <= 0.0 or guide_angle >= 180.0:
+        raise ValueError(f"focus guide angle_degrees must be > 0 and < 180, got {angle_degrees}")
+    if guide_width <= 0:
+        raise ValueError(f"focus guide line_width must be > 0, got {line_width}")
+    return guide_angle, guide_width
+
+
+def render_frame_with_focus_guides(frame: np.ndarray, session: "OfflineSession", config: OfflineConfig) -> np.ndarray:
     if session.focus_anchor is None:
         return frame
     image = pil_image_from_array(frame)
     if image.mode == "L":
         image = image.convert("RGB")
     draw = ImageDraw.Draw(image)
-    draw_focus_guide_lines(draw, image.size, session.focus_anchor)
+    draw_focus_guide_lines(
+        draw,
+        image.size,
+        session.focus_anchor,
+        config.focus_guide_angle_degrees,
+        config.focus_guide_line_width,
+    )
     draw_focus_marker(draw, image.size, session.focus_anchor)
     return np.array(image)
 
@@ -702,7 +723,13 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
     image = Image.fromarray(rgb)
     draw = ImageDraw.Draw(image)
     if session.focus_anchor is not None:
-        draw_focus_guide_lines(draw, image.size, session.focus_anchor)
+        draw_focus_guide_lines(
+            draw,
+            image.size,
+            session.focus_anchor,
+            config.focus_guide_angle_degrees,
+            config.focus_guide_line_width,
+        )
     try:
         font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 18)
     except Exception:
@@ -835,6 +862,15 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     stop_wait_timeout_seconds = settings.get("offline_stop_wait_timeout_seconds", 20.0)
     g1g2_override = peak.get("roi3_g1_g2_override") or peak.get("g1_g2_override") or {}
     column_override = peak.get("roi3_column_diff_override") or {}
+    focus_guides = settings.get("focus_guides")
+    if focus_guides is None:
+        focus_guides = {}
+    if not isinstance(focus_guides, dict):
+        raise ValueError("settings.focus_guides must be an object when provided")
+    focus_guide_angle_degrees, focus_guide_line_width = validate_focus_guide_geometry(
+        focus_guides.get("angle_degrees", GUIDE_LINE_ANGLE_DEGREES),
+        focus_guides.get("line_width", GUIDE_LINE_WIDTH),
+    )
     image_output_dir = settings.get("image_output_dir", "D:/software_data/imgs")
     db_root_dir = settings.get("db_root_dir", "D:/software_data")
     result_flag_path = settings.get("result_flag_path", "D:/software_data/result.txt")
@@ -859,11 +895,14 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         image_output_dir=str(image_output_dir) if image_output_dir else None,
         db_root_dir=str(db_root_dir) if db_root_dir else None,
         result_flag_path=str(result_flag_path) if result_flag_path else None,
+        focus_guide_angle_degrees=focus_guide_angle_degrees,
+        focus_guide_line_width=focus_guide_line_width,
     )
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
         "roi2_extension_params=%s roi3_extension_params=%s difference_threshold=%s debug_save_enabled=%s "
-        "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s",
+        "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
+        "focus_guide_angle_degrees=%s focus_guide_line_width=%s",
         config.screenshot_test_enabled,
         config.screenshot_capture_bbox,
         config.peak_detect_enabled,
@@ -878,6 +917,8 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.image_output_dir,
         config.db_root_dir,
         config.result_flag_path,
+        config.focus_guide_angle_degrees,
+        config.focus_guide_line_width,
     )
     return config
 
@@ -1765,9 +1806,9 @@ class OfflineSessionManager:
             before_path = img_dir / "energy_before.png"
             after_path = img_dir / "energy_after.png"
         if session.before is not None:
-            write_png(before_path, render_frame_with_focus_guides(session.before, session))
+            write_png(before_path, render_frame_with_focus_guides(session.before, session, self._config))
         if session.after is not None:
-            write_png(after_path, render_frame_with_focus_guides(session.after, session))
+            write_png(after_path, render_frame_with_focus_guides(session.after, session, self._config))
         result = {}
         treatment_ok = session.final_roi2_color == "green"
         result_flag_value = "1" if treatment_ok else "0"

@@ -338,6 +338,7 @@ class ApiServerTests(unittest.TestCase):
                 },
                 "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
                 "offline_stop_wait_timeout_seconds": 8.0,
+                "focus_guides": {"angle_degrees": 88.0, "line_width": 5},
             },
             self.make_null_logger("test_parse_offline_config_reads_roi_and_debug_settings"),
         )
@@ -356,6 +357,8 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(config.debug_save_dir, "D:/software_data/tmp")
         self.assertEqual(config.stop_wait_timeout_seconds, 8.0)
         self.assertTrue(config.screenshot_test_enabled)
+        self.assertEqual(config.focus_guide_angle_degrees, 88.0)
+        self.assertEqual(config.focus_guide_line_width, 5)
 
     def test_parse_offline_config_reads_screenshot_roi_capture_region(self):
         config = api_server.parse_offline_config(
@@ -734,7 +737,7 @@ class ApiServerTests(unittest.TestCase):
         )
 
         manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
-        time.sleep(0.15)
+        time.sleep(0.3)
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
         self.assertEqual(stop["info"], "offline_stop_completed")
@@ -1155,6 +1158,44 @@ class ApiServerTests(unittest.TestCase):
                 self.assert_pixel_near(actual, guide_x, guide_y, (0, 255, 0))
             self.assertEqual(tuple(before_actual[150, 100][:3]), (128, 0, 128))
             self.assertEqual(tuple(after_actual[150, 100][:3]), (128, 0, 128))
+
+    def test_offline_final_images_use_configured_focus_guide_angle_and_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((200, 200, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((200, 200, 3), 30, dtype=np.uint8), 2, 2.0),
+                ]
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 10, "right": 10, "top": 6, "bottom": 6},
+                    roi3_extension_params={"left": 20, "right": 20, "top": 15, "bottom": 15},
+                    difference_threshold=5.0,
+                    focus_guide_angle_degrees=60.0,
+                    focus_guide_line_width=7,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=None,
+                ),
+                logger=self.make_null_logger("test_offline_final_images_use_configured_focus_guide_angle_and_width"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            before_actual = np.array(api_server.Image.open(Path(stop["before_path"])))
+            guide_x = int(round(100 - np.sin(np.deg2rad(30.0)) * 30.0))
+            guide_y = int(round(150 - np.cos(np.deg2rad(30.0)) * 30.0))
+            wide_x = int(round(guide_x - np.cos(np.deg2rad(30.0)) * 3.0))
+            wide_y = int(round(guide_y + np.sin(np.deg2rad(30.0)) * 3.0))
+
+            self.assert_pixel_near(before_actual, guide_x, guide_y, (0, 255, 0), radius=1)
+            self.assert_pixel_near(before_actual, wide_x, wide_y, (0, 255, 0), radius=1)
 
     def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
         before = np.zeros((4, 4, 4), dtype=np.uint8)

@@ -9,6 +9,9 @@
   "_comment_diff_label": "Text overlay style for differ/diff images (e.g. FEM result label).",
   "diff_label": { "pil_font_size": 18, "pil_spacing": 2, "cv_scale": 0.34, "cv_thickness": 1, "cv_line_step": 16 },
 
+  "_comment_focus_guides": "Focus guide lines on before/after/diff final images. angle_degrees is the angle between the two green lines; line_width is in pixels.",
+  "focus_guides": { "angle_degrees": 100.0, "line_width": 3 },
+
   "_comment_roi1_capture": "Optional: capture a smaller ROI1 region instead of full screen to reduce screenshot/convert overhead.",
   "roi1_capture": {
     "enabled": false,
