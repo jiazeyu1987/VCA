@@ -1701,6 +1701,8 @@ class OfflineSessionManager:
         if session.after is not None:
             write_png(after_path, session.after)
         result = {}
+        treatment_ok = session.final_roi2_color == "green"
+        result_flag_value = "1" if treatment_ok else "0"
         if session.before is not None:
             result["before_path"] = str(before_path)
         if session.after is not None:
@@ -1711,14 +1713,31 @@ class OfflineSessionManager:
             if diff_with_overlay is not None:
                 write_png(diff_path, diff_with_overlay)
             result["diff_path"] = str(diff_path)
+            self._offline_diag(
+                "main_program_state_sync_begin",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                roi2_color=session.final_roi2_color,
+                treatment_ok=bool(treatment_ok),
+                result_flag_path=self._config.result_flag_path,
+                result_flag_value=result_flag_value,
+                is_save=bool(session.is_save),
+                db_root_dir=self._config.db_root_dir,
+                before_path=str(before_path),
+                after_path=str(after_path),
+                diff_path=str(diff_path),
+            )
             try:
-                write_result_flag(self._config.result_flag_path, session.final_roi2_color == "green")
+                write_result_flag(self._config.result_flag_path, treatment_ok)
                 self._offline_diag(
                     "result_flag_written",
                     point_id=session.point_id,
                     capture_source="image_matrix",
+                    roi2_color=session.final_roi2_color,
+                    treatment_ok=bool(treatment_ok),
                     result_flag_path=self._config.result_flag_path,
-                    value="1" if session.final_roi2_color == "green" else "0",
+                    result_flag_value=result_flag_value,
+                    value=result_flag_value,
                 )
             except Exception:
                 self._logger.exception("OFFLINE result flag write failed: point_id=%s", session.point_id)
@@ -1729,29 +1748,64 @@ class OfflineSessionManager:
                         session.point_id,
                         str(before_path),
                         str(after_path),
-                        session.final_roi2_color == "green",
+                        treatment_ok,
                     )
                     self._offline_diag(
                         "db_update_completed",
                         point_id=session.point_id,
                         capture_source="image_matrix",
+                        roi2_color=session.final_roi2_color,
+                        treatment_ok=bool(treatment_ok),
                         before_path=str(before_path),
                         after_path=str(after_path),
                         db_root_dir=self._config.db_root_dir,
                     )
                 except Exception as exc:
+                    self._offline_diag(
+                        "db_update_failed",
+                        level="error",
+                        point_id=session.point_id,
+                        capture_source="image_matrix",
+                        roi2_color=session.final_roi2_color,
+                        treatment_ok=bool(treatment_ok),
+                        before_path=str(before_path),
+                        after_path=str(after_path),
+                        db_root_dir=self._config.db_root_dir,
+                        error=str(exc),
+                    )
                     result["db_update_error"] = str(exc)
         self._offline_diag(
             "final_outputs_saved",
             point_id=session.point_id,
             capture_source="image_matrix",
             is_save=bool(session.is_save),
+            roi2_color=session.final_roi2_color,
+            treatment_ok=bool(treatment_ok),
+            result_flag_path=self._config.result_flag_path,
+            result_flag_value=result_flag_value,
             output_dir=str(img_dir),
             before_path=result.get("before_path"),
             after_path=result.get("after_path"),
             diff_path=result.get("diff_path"),
         )
         return result
+
+    def _log_final_response_ready(self, session: OfflineSession) -> None:
+        response = session.response if isinstance(session.response, dict) else {}
+        roi2_color = response.get("roi2_color", session.final_roi2_color)
+        self._offline_diag(
+            "final_response_ready",
+            point_id=session.point_id,
+            capture_source="image_matrix",
+            response_success=response.get("success"),
+            response_info=response.get("info"),
+            roi2_color=roi2_color,
+            treatment_ok=str(roi2_color).strip().lower() == "green",
+            response_keys=sorted([str(key) for key in response.keys()]),
+            before_path=response.get("before_path"),
+            after_path=response.get("after_path"),
+            diff_path=response.get("diff_path"),
+        )
 
     def _run_session(self, session: OfflineSession) -> None:
         timed_out = False
@@ -1974,6 +2028,7 @@ class OfflineSessionManager:
                     "info": "final_output_save_failed",
                     "point_id": session.point_id,
                 }
+                self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
             try:
@@ -1985,6 +2040,7 @@ class OfflineSessionManager:
                     "info": "debug_save_failed",
                     "point_id": session.point_id,
                 }
+                self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
 
@@ -1994,11 +2050,12 @@ class OfflineSessionManager:
                 session.response.update(result_paths)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
+                self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
 
             if db_update_error is not None:
-                self._logger.exception("OFFLINE db update failed: point_id=%s", session.point_id)
+                self._logger.error("OFFLINE db update failed: point_id=%s error=%s", session.point_id, db_update_error)
                 session.response = {
                     "success": False,
                     "info": "db_update_failed",
@@ -2008,6 +2065,7 @@ class OfflineSessionManager:
                 session.response.update(result_paths)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
+                self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
 
@@ -2035,6 +2093,7 @@ class OfflineSessionManager:
             session.response.update(result_paths)
             if session.debug_dir is not None:
                 session.response["debug_dir"] = session.debug_dir
+            self._log_final_response_ready(session)
             session.finished_event.set()
 
 

@@ -1168,6 +1168,46 @@ class ApiServerTests(unittest.TestCase):
             self.assertIn('"meta_jsonl":', log_text)
             self.assertIn('"diff_path":', log_text)
 
+    def test_offline_green_save_logs_main_program_state_sync(self):
+        logger, stream = self.make_stream_logger("test_offline_green_save_logs_main_program_state_sync")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.create_segment_images_db_pair(tmp)
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=tmp,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=logger,
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertEqual(stop["roi2_color"], "green")
+            log_text = stream.getvalue()
+            self.assertIn("OFFLINE diag main_program_state_sync_begin:", log_text)
+            self.assertIn("OFFLINE diag result_flag_written:", log_text)
+            self.assertIn("OFFLINE diag db_update_completed:", log_text)
+            self.assertIn("OFFLINE diag final_response_ready:", log_text)
+            self.assertIn('"roi2_color": "green"', log_text)
+            self.assertIn('"treatment_ok": true', log_text)
+            self.assertIn('"result_flag_value": "1"', log_text)
+            self.assertIn('"response_success": true', log_text)
+            self.assertIn('"response_info": "offline_stop_completed"', log_text)
+
     def test_offline_save_updates_db_image_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             frames = self.SequenceFrameSource([
