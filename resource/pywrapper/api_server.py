@@ -1793,6 +1793,9 @@ class OfflineSessionManager:
     def _log_final_response_ready(self, session: OfflineSession) -> None:
         response = session.response if isinstance(session.response, dict) else {}
         roi2_color = response.get("roi2_color", session.final_roi2_color)
+        treatment_ok = response.get("treatment_ok")
+        if treatment_ok is None:
+            treatment_ok = str(roi2_color).strip().lower() == "green"
         self._offline_diag(
             "final_response_ready",
             point_id=session.point_id,
@@ -1800,12 +1803,24 @@ class OfflineSessionManager:
             response_success=response.get("success"),
             response_info=response.get("info"),
             roi2_color=roi2_color,
-            treatment_ok=str(roi2_color).strip().lower() == "green",
+            treatment_ok=bool(treatment_ok),
             response_keys=sorted([str(key) for key in response.keys()]),
             before_path=response.get("before_path"),
             after_path=response.get("after_path"),
             diff_path=response.get("diff_path"),
         )
+
+    def _attach_treatment_result_fields(self, session: OfflineSession) -> None:
+        if not isinstance(session.response, dict):
+            return
+        session.response["roi2_color"] = session.final_roi2_color
+        session.response["treatment_ok"] = session.final_roi2_color == "green"
+        if session.roi2_diff is not None and "roi2_diff" not in session.response:
+            session.response["roi2_diff"] = round(float(session.roi2_diff), 6)
+        if session.before_mean is not None and "roi2_before_mean" not in session.response:
+            session.response["roi2_before_mean"] = round(float(session.before_mean), 6)
+        if session.after_mean is not None and "roi2_after_mean" not in session.response:
+            session.response["roi2_after_mean"] = round(float(session.after_mean), 6)
 
     def _run_session(self, session: OfflineSession) -> None:
         timed_out = False
@@ -2028,6 +2043,7 @@ class OfflineSessionManager:
                     "info": "final_output_save_failed",
                     "point_id": session.point_id,
                 }
+                self._attach_treatment_result_fields(session)
                 self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
@@ -2040,6 +2056,7 @@ class OfflineSessionManager:
                     "info": "debug_save_failed",
                     "point_id": session.point_id,
                 }
+                self._attach_treatment_result_fields(session)
                 self._log_final_response_ready(session)
                 session.finished_event.set()
                 return
@@ -2048,6 +2065,7 @@ class OfflineSessionManager:
             if pending_error_response is not None:
                 session.response = dict(pending_error_response)
                 session.response.update(result_paths)
+                self._attach_treatment_result_fields(session)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
                 self._log_final_response_ready(session)
@@ -2063,6 +2081,7 @@ class OfflineSessionManager:
                     "error": str(db_update_error),
                 }
                 session.response.update(result_paths)
+                self._attach_treatment_result_fields(session)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
                 self._log_final_response_ready(session)
@@ -2075,6 +2094,7 @@ class OfflineSessionManager:
                 "point_id": session.point_id,
                 "peak_detect_enabled": bool(self._config.peak_detect_enabled),
                 "roi2_color": session.final_roi2_color,
+                "treatment_ok": session.final_roi2_color == "green",
                 "roi2_diff": round(float(session.roi2_diff), 6) if session.roi2_diff is not None else None,
                 "roi2_before_mean": round(float(session.before_mean), 6) if session.before_mean is not None else None,
                 "roi2_after_mean": round(float(session.after_mean), 6) if session.after_mean is not None else None,

@@ -1380,11 +1380,13 @@ class ApiServerTests(unittest.TestCase):
 
             self.assertFalse(stop["success"])
             self.assertEqual(stop["info"], "error_in_detect")
+            self.assertEqual(stop["roi2_color"], "green")
+            self.assertTrue(stop["treatment_ok"])
             update_mock.assert_called_once()
             self.assertEqual(update_mock.call_args.args[1], 123)
             self.assertEqual(update_mock.call_args.args[2], stop["before_path"])
             self.assertEqual(update_mock.call_args.args[3], stop["after_path"])
-            self.assertIsInstance(update_mock.call_args.args[4], bool)
+            self.assertTrue(update_mock.call_args.args[4])
 
     def test_offline_red_path_logs_decision_details(self):
         logger, stream = self.make_stream_logger("test_offline_red_path_logs_decision_details")
