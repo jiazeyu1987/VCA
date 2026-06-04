@@ -141,6 +141,61 @@ class ApiServerTests(unittest.TestCase):
         image[306:495, 16:577] = roi4_value
         return api_server.FrameSnapshot(image, seq, float(seq))
 
+    def make_roi4_records(self):
+        frames = [
+            self.make_roi4_frame(10, 10, 1),
+            self.make_roi4_frame(11, 10, 2),
+            self.make_roi4_frame(60, 80, 3),
+            self.make_roi4_frame(60, 80, 4),
+            self.make_roi4_frame(20, 10, 5),
+            self.make_roi4_frame(20, 10, 6),
+            self.make_roi4_frame(12, 10, 7),
+        ]
+        return [
+            api_server.OfflineFrameRecord(frame.image, frame.seq, frame.ts, index + 1, "frame", float(np.mean(frame.image)))
+            for index, frame in enumerate(frames)
+        ]
+
+    def make_roi4_manager(self):
+        return api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            frame_fetcher=self.SequenceFrameSource([]),
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi4_rect=(16, 306, 577, 495),
+                roi4_after_selector={
+                    "enabled": True,
+                    "block_size": 24,
+                    "gray_diff_threshold": 15.0,
+                    "candidate_area_ratio_threshold": 3.0,
+                    "descent_low_frame_number": 2,
+                },
+                difference_threshold=5.0,
+            ),
+            logger=self.make_null_logger("roi4_manager"),
+        )
+
+    def make_roi4_session(self, after_method: str) -> api_server.OfflineSession:
+        records = self.make_roi4_records()
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.initial_before_record = records[0]
+        session.frame_buffer = records
+        session.before = np.array(records[0].frame, copy=True)
+        session.before_seq = records[0].seq
+        session.before_ts = records[0].ts
+        session.after = np.array(records[-1].frame, copy=True)
+        session.after_seq = records[-1].seq
+        session.after_ts = records[-1].ts
+        session.after_method = after_method
+        return session
+
     def test_parse_request_accepts_existing_protocol(self):
         parsed = api_server.parse_request('ONLINE;31415;{"point_id": 123}')
 
@@ -1000,6 +1055,28 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(stop["info"], "offline_stop_completed")
         self.assertFalse(stop["roi4_after_selector_applied"])
         self.assertEqual(stop["after_seq"], 7)
+
+    def test_roi4_selector_applies_to_all_fallback_after_methods(self):
+        manager = self.make_roi4_manager()
+        for method in sorted(api_server.ROI4_FALLBACK_AFTER_METHODS):
+            with self.subTest(method=method):
+                session = self.make_roi4_session(method)
+
+                manager._apply_roi4_after_selector_if_needed(session)
+
+                self.assertTrue(session.roi4_after_selector_applied)
+                self.assertEqual(session.after_seq, 6)
+                self.assertEqual(session.after_method, "roi4_mask_descent_second")
+
+    def test_roi4_selector_does_not_affect_normal_boundary_after_method(self):
+        manager = self.make_roi4_manager()
+        session = self.make_roi4_session("roi1_boundary_after2")
+
+        manager._apply_roi4_after_selector_if_needed(session)
+
+        self.assertFalse(session.roi4_after_selector_applied)
+        self.assertEqual(session.after_seq, 7)
+        self.assertEqual(session.after_method, "roi1_boundary_after2")
 
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
