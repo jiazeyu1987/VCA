@@ -85,6 +85,14 @@ class ApiServerTests(unittest.TestCase):
         logger.addHandler(handler)
         return logger, stream
 
+    def assert_pixel_near(self, image: np.ndarray, x: int, y: int, expected, radius: int = 2):
+        height, width = image.shape[:2]
+        for yy in range(max(0, y - radius), min(height, y + radius + 1)):
+            for xx in range(max(0, x - radius), min(width, x + radius + 1)):
+                if tuple(image[yy, xx][:3]) == tuple(expected):
+                    return
+        self.fail(f"expected color {expected} near ({x}, {y})")
+
     def create_segment_images_db_pair(self, root_dir: str, point_id: int = 123) -> None:
         for db_name in ("ccwssm", "zccwssm"):
             conn = sqlite3.connect(str(Path(root_dir) / db_name))
@@ -1107,6 +1115,46 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(tuple(actual[84, 80]), (0, 255, 0))
             self.assertEqual(tuple(actual[75, 80]), (255, 255, 0))
             self.assertEqual(tuple(actual[90, 80]), (128, 0, 128))
+
+    def test_offline_final_images_draw_focus_guides_on_before_after_and_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((200, 200, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((200, 200, 3), 30, dtype=np.uint8), 2, 2.0),
+                ]
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 10, "right": 10, "top": 6, "bottom": 6},
+                    roi3_extension_params={"left": 20, "right": 20, "top": 15, "bottom": 15},
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=None,
+                ),
+                logger=self.make_null_logger("test_offline_final_images_draw_focus_guides_on_before_after_and_diff"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            before_actual = np.array(api_server.Image.open(Path(stop["before_path"])))
+            after_actual = np.array(api_server.Image.open(Path(stop["after_path"])))
+            diff_actual = np.array(api_server.Image.open(Path(stop["diff_path"])))
+            guide_x = int(round(100 - np.sin(np.deg2rad(50.0)) * 30.0))
+            guide_y = int(round(150 - np.cos(np.deg2rad(50.0)) * 30.0))
+
+            self.assertEqual(tuple(before_actual[0, 0][:3]), (10, 10, 10))
+            self.assertEqual(tuple(after_actual[0, 0][:3]), (30, 30, 30))
+            for actual in (before_actual, after_actual, diff_actual):
+                self.assert_pixel_near(actual, guide_x, guide_y, (0, 255, 0))
+            self.assertEqual(tuple(before_actual[150, 100][:3]), (128, 0, 128))
+            self.assertEqual(tuple(after_actual[150, 100][:3]), (128, 0, 128))
 
     def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
         before = np.zeros((4, 4, 4), dtype=np.uint8)

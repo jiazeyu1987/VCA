@@ -4,6 +4,7 @@ import ctypes
 import errno
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -54,6 +55,9 @@ ROI3_MARKER_COLOR = (255, 255, 0)
 FOCUS_MARKER_COLOR = (128, 0, 128)
 DIFFER_MARKER_WIDTH = 3
 FOCUS_MARKER_RADIUS = 3
+GUIDE_LINE_COLOR = (0, 255, 0)
+GUIDE_LINE_WIDTH = 3
+GUIDE_LINE_ANGLE_DEGREES = 100.0
 
 
 class StateInfo(ctypes.Structure):
@@ -435,16 +439,19 @@ def crop_rect(image: np.ndarray, rect: Tuple[int, int, int, int]) -> np.ndarray:
     return np.array(cropped, copy=True)
 
 
-def write_png(path: Path, image: np.ndarray) -> None:
+def pil_image_from_array(image: np.ndarray) -> Image.Image:
     arr = np.asarray(image)
     if arr.ndim == 2:
-        pil_image = Image.fromarray(arr)
+        return Image.fromarray(arr)
     elif arr.ndim == 3 and arr.shape[2] == 3:
-        pil_image = Image.fromarray(arr.astype(np.uint8))
+        return Image.fromarray(arr.astype(np.uint8))
     elif arr.ndim == 3 and arr.shape[2] == 4:
-        pil_image = Image.fromarray(arr.astype(np.uint8))
-    else:
-        raise ValueError(f"unsupported image shape for png: {arr.shape}")
+        return Image.fromarray(arr.astype(np.uint8))
+    raise ValueError(f"unsupported image shape for png: {arr.shape}")
+
+
+def write_png(path: Path, image: np.ndarray) -> None:
+    pil_image = pil_image_from_array(image)
     path.parent.mkdir(parents=True, exist_ok=True)
     pil_image.save(path, format="PNG")
 
@@ -524,12 +531,71 @@ def draw_focus_marker(
     image_size: Tuple[int, int],
     focus_anchor: Tuple[int, int],
 ) -> None:
+    x, y = validate_focus_anchor(image_size, focus_anchor)
+    radius = FOCUS_MARKER_RADIUS
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=FOCUS_MARKER_COLOR)
+
+
+def validate_focus_anchor(image_size: Tuple[int, int], focus_anchor: Tuple[int, int]) -> Tuple[int, int]:
     width, height = image_size
     x, y = [int(v) for v in focus_anchor]
     if x < 0 or y < 0 or x >= width or y >= height:
         raise ValueError(f"focus marker outside image bounds focus={focus_anchor} size={image_size}")
-    radius = FOCUS_MARKER_RADIUS
-    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=FOCUS_MARKER_COLOR)
+    return x, y
+
+
+def clip_focus_guide_endpoint(
+    image_size: Tuple[int, int],
+    focus_anchor: Tuple[int, int],
+    direction: Tuple[float, float],
+) -> Tuple[int, int]:
+    width, height = image_size
+    x, y = validate_focus_anchor(image_size, focus_anchor)
+    dx, dy = direction
+    candidates = []
+    if dx < 0:
+        candidates.append((0 - x) / dx)
+    elif dx > 0:
+        candidates.append(((width - 1) - x) / dx)
+    if dy < 0:
+        candidates.append((0 - y) / dy)
+    elif dy > 0:
+        candidates.append(((height - 1) - y) / dy)
+    positive_candidates = [t for t in candidates if t >= 0]
+    if not positive_candidates:
+        raise ValueError(f"focus guide has no image-boundary endpoint focus={focus_anchor} direction={direction} size={image_size}")
+    distance = min(positive_candidates)
+    end_x = int(round(x + dx * distance))
+    end_y = int(round(y + dy * distance))
+    return max(0, min(width - 1, end_x)), max(0, min(height - 1, end_y))
+
+
+def draw_focus_guide_lines(
+    draw: ImageDraw.ImageDraw,
+    image_size: Tuple[int, int],
+    focus_anchor: Tuple[int, int],
+) -> None:
+    x, y = validate_focus_anchor(image_size, focus_anchor)
+    half_angle = math.radians(GUIDE_LINE_ANGLE_DEGREES / 2.0)
+    directions = (
+        (-math.sin(half_angle), -math.cos(half_angle)),
+        (math.sin(half_angle), -math.cos(half_angle)),
+    )
+    for direction in directions:
+        end_x, end_y = clip_focus_guide_endpoint(image_size, (x, y), direction)
+        draw.line((x, y, end_x, end_y), fill=GUIDE_LINE_COLOR, width=GUIDE_LINE_WIDTH)
+
+
+def render_frame_with_focus_guides(frame: np.ndarray, session: "OfflineSession") -> np.ndarray:
+    if session.focus_anchor is None:
+        return frame
+    image = pil_image_from_array(frame)
+    if image.mode == "L":
+        image = image.convert("RGB")
+    draw = ImageDraw.Draw(image)
+    draw_focus_guide_lines(draw, image.size, session.focus_anchor)
+    draw_focus_marker(draw, image.size, session.focus_anchor)
+    return np.array(image)
 
 
 def draw_differ_roi_markers(
@@ -635,6 +701,8 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
         rgb = np.stack([rgb, rgb, rgb], axis=2)
     image = Image.fromarray(rgb)
     draw = ImageDraw.Draw(image)
+    if session.focus_anchor is not None:
+        draw_focus_guide_lines(draw, image.size, session.focus_anchor)
     try:
         font = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 18)
     except Exception:
@@ -1697,9 +1765,9 @@ class OfflineSessionManager:
             before_path = img_dir / "energy_before.png"
             after_path = img_dir / "energy_after.png"
         if session.before is not None:
-            write_png(before_path, session.before)
+            write_png(before_path, render_frame_with_focus_guides(session.before, session))
         if session.after is not None:
-            write_png(after_path, session.after)
+            write_png(after_path, render_frame_with_focus_guides(session.after, session))
         result = {}
         treatment_ok = session.final_roi2_color == "green"
         result_flag_value = "1" if treatment_ok else "0"
