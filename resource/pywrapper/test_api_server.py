@@ -141,22 +141,36 @@ class ApiServerTests(unittest.TestCase):
         image[306:495, 16:577] = roi4_value
         return api_server.FrameSnapshot(image, seq, float(seq))
 
-    def make_roi4_records(self):
-        frames = [
-            self.make_roi4_frame(10, 10, 1),
-            self.make_roi4_frame(11, 10, 2),
-            self.make_roi4_frame(60, 80, 3),
-            self.make_roi4_frame(60, 80, 4),
-            self.make_roi4_frame(20, 10, 5),
-            self.make_roi4_frame(20, 10, 6),
-            self.make_roi4_frame(12, 10, 7),
-        ]
+    def make_roi4_records(self, frames=None):
+        if frames is None:
+            frames = [
+                self.make_roi4_frame(10, 10, 1),
+                self.make_roi4_frame(11, 10, 2),
+                self.make_roi4_frame(60, 80, 3),
+                self.make_roi4_frame(60, 80, 4),
+                self.make_roi4_frame(20, 10, 5),
+                self.make_roi4_frame(20, 10, 6),
+                self.make_roi4_frame(12, 10, 7),
+            ]
         return [
             api_server.OfflineFrameRecord(frame.image, frame.seq, frame.ts, index + 1, "frame", float(np.mean(frame.image)))
             for index, frame in enumerate(frames)
         ]
 
-    def make_roi4_manager(self):
+    def make_roi4_no_match_records(self):
+        return self.make_roi4_records(
+            [
+            self.make_roi4_frame(10, 10, 1),
+            self.make_roi4_frame(11, 10, 2),
+            self.make_roi4_frame(60, 80, 3),
+            self.make_roi4_frame(60, 80, 4),
+            self.make_roi4_frame(20, 80, 5),
+            self.make_roi4_frame(20, 80, 6),
+            self.make_roi4_frame(12, 80, 7),
+            ]
+        )
+
+    def make_roi4_manager(self, logger=None, roi4_rect=(16, 306, 577, 495)):
         return api_server.OfflineSessionManager(
             provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
             frame_fetcher=self.SequenceFrameSource([]),
@@ -164,7 +178,7 @@ class ApiServerTests(unittest.TestCase):
                 peak_detect_enabled=True,
                 roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
                 roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
-                roi4_rect=(16, 306, 577, 495),
+                roi4_rect=roi4_rect,
                 roi4_after_selector={
                     "enabled": True,
                     "block_size": 24,
@@ -174,11 +188,12 @@ class ApiServerTests(unittest.TestCase):
                 },
                 difference_threshold=5.0,
             ),
-            logger=self.make_null_logger("roi4_manager"),
+            logger=logger or self.make_null_logger("roi4_manager"),
         )
 
-    def make_roi4_session(self, after_method: str) -> api_server.OfflineSession:
-        records = self.make_roi4_records()
+    def make_roi4_session(self, after_method: str, records=None) -> api_server.OfflineSession:
+        if records is None:
+            records = self.make_roi4_records()
         session = api_server.OfflineSession(
             point_id=123,
             duration_s=10.0,
@@ -1077,6 +1092,58 @@ class ApiServerTests(unittest.TestCase):
         self.assertFalse(session.roi4_after_selector_applied)
         self.assertEqual(session.after_seq, 7)
         self.assertEqual(session.after_method, "roi1_boundary_after2")
+
+    def test_roi4_selector_logs_state_transitions_for_selected_fallback(self):
+        logger, stream = self.make_stream_logger("test_roi4_selector_logs_state_transitions_for_selected_fallback")
+        manager = self.make_roi4_manager(logger=logger)
+        session = self.make_roi4_session("stop_fallback")
+
+        manager._apply_roi4_after_selector_if_needed(session)
+
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag roi4_after_selector_begin:", log_text)
+        self.assertIn('"original_after_method": "stop_fallback"', log_text)
+        self.assertIn("OFFLINE diag roi4_after_selector_high_enter:", log_text)
+        self.assertIn("OFFLINE diag roi4_after_selector_descent_low:", log_text)
+        self.assertIn("OFFLINE diag roi4_after_selected:", log_text)
+        self.assertIn('"frame_index": 6', log_text)
+        self.assertIn('"candidate_area_ratio_threshold": 3.0', log_text)
+
+    def test_roi4_selector_logs_skip_for_normal_after_method(self):
+        logger, stream = self.make_stream_logger("test_roi4_selector_logs_skip_for_normal_after_method")
+        manager = self.make_roi4_manager(logger=logger)
+        session = self.make_roi4_session("roi1_boundary_after2")
+
+        manager._apply_roi4_after_selector_if_needed(session)
+
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag roi4_after_selector_skip:", log_text)
+        self.assertIn('"reason": "after_method_not_fallback"', log_text)
+        self.assertIn('"after_method": "roi1_boundary_after2"', log_text)
+
+    def test_roi4_selector_logs_no_match_reason(self):
+        logger, stream = self.make_stream_logger("test_roi4_selector_logs_no_match_reason")
+        manager = self.make_roi4_manager(logger=logger)
+        session = self.make_roi4_session("stop_fallback", self.make_roi4_no_match_records())
+
+        manager._apply_roi4_after_selector_if_needed(session)
+
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag roi4_after_selector_no_match:", log_text)
+        self.assertIn('"reason": "no_low_high_low_sequence"', log_text)
+        self.assertIn('"scanned_frame_count": 6', log_text)
+
+    def test_roi4_selector_logs_failure_before_raising(self):
+        logger, stream = self.make_stream_logger("test_roi4_selector_logs_failure_before_raising")
+        manager = self.make_roi4_manager(logger=logger, roi4_rect=(16, 306, 9999, 9999))
+        session = self.make_roi4_session("stop_fallback")
+
+        with self.assertRaisesRegex(ValueError, "ROI4 rect outside image bounds"):
+            manager._apply_roi4_after_selector_if_needed(session)
+
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag roi4_after_selector_failed:", log_text)
+        self.assertIn('"error": "ROI4 rect outside image bounds', log_text)
 
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(

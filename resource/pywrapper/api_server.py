@@ -1880,110 +1880,210 @@ class OfflineSessionManager:
     def _apply_roi4_after_selector_if_needed(self, session: OfflineSession) -> None:
         selector = dict(self._config.roi4_after_selector or {})
         if not bool(selector.get("enabled", False)):
+            self._offline_diag(
+                "roi4_after_selector_skip",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                reason="disabled",
+                after_method=session.after_method,
+            )
             return
         if session.after_method not in ROI4_FALLBACK_AFTER_METHODS:
-            return
-        if self._config.roi4_rect is None:
-            raise ValueError("ROI4 after selector requires roi4_rect")
-        if session.initial_before_record is None:
-            raise ValueError("ROI4 after selector requires initial before frame")
-        if not session.frame_buffer:
-            raise ValueError("ROI4 after selector requires buffered frames")
-
-        block_size = int(selector.get("block_size", 24))
-        gray_diff_threshold = float(selector.get("gray_diff_threshold", 15.0))
-        area_threshold = float(selector.get("candidate_area_ratio_threshold", 3.0))
-        descent_low_frame_number = int(selector.get("descent_low_frame_number", 2))
-        if block_size <= 0:
-            raise ValueError("ROI4 block_size must be > 0")
-        if gray_diff_threshold <= 0.0:
-            raise ValueError("ROI4 gray_diff_threshold must be > 0")
-        if area_threshold <= 0.0:
-            raise ValueError("ROI4 candidate_area_ratio_threshold must be > 0")
-        if descent_low_frame_number <= 0:
-            raise ValueError("ROI4 descent_low_frame_number must be > 0")
-
-        baseline = session.initial_before_record
-        roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, baseline.frame)
-        session.roi4_rect = roi4_rect
-        session.roi4_candidate_area_ratio_threshold = area_threshold
-        session.roi4_after_selector_applied = False
-        session.roi4_after_frame_index = None
-        session.roi4_after_method = None
-        session.roi4_selector_reason = "no_low_high_low_sequence"
-
-        seen_low_before_high = False
-        seen_high = False
-        low_after_high_count = 0
-        selected_record = None
-        selected_metrics = None
-        last_metrics = None
-
-        for record in session.frame_buffer:
-            if int(record.frame_index) <= int(baseline.frame_index):
-                continue
-            metrics = compute_roi4_mask_metrics(
-                baseline.frame,
-                record.frame,
-                roi4_rect,
-                block_size=block_size,
-                gray_diff_threshold=gray_diff_threshold,
+            self._offline_diag(
+                "roi4_after_selector_skip",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                reason="after_method_not_fallback",
+                after_method=session.after_method,
+                fallback_methods=sorted(ROI4_FALLBACK_AFTER_METHODS),
             )
-            last_metrics = metrics
-            ratio = float(metrics["candidate_area_ratio"])
-            if not seen_high:
-                if ratio < area_threshold:
-                    seen_low_before_high = True
-                    continue
-                if seen_low_before_high and ratio >= area_threshold:
-                    seen_high = True
-                    low_after_high_count = 0
-                continue
-
-            if ratio < area_threshold:
-                low_after_high_count += 1
-                if low_after_high_count >= descent_low_frame_number:
-                    selected_record = record
-                    selected_metrics = metrics
-                    break
-            else:
-                low_after_high_count = 0
-
-        if selected_record is None:
-            if last_metrics is not None:
-                session.roi4_candidate_area_ratio = float(last_metrics["candidate_area_ratio"])
             return
+        try:
+            if self._config.roi4_rect is None:
+                raise ValueError("ROI4 after selector requires roi4_rect")
+            if session.initial_before_record is None:
+                raise ValueError("ROI4 after selector requires initial before frame")
+            if not session.frame_buffer:
+                raise ValueError("ROI4 after selector requires buffered frames")
 
-        session.before = np.array(baseline.frame, copy=True)
-        session.before_seq = int(baseline.seq)
-        session.before_ts = float(baseline.ts)
-        session.before_name = format_frame_timestamp(baseline.ts)
-        session.after = np.array(selected_record.frame, copy=True)
-        session.after_seq = int(selected_record.seq)
-        session.after_ts = float(selected_record.ts)
-        session.after_name = format_frame_timestamp(selected_record.ts)
-        session.after_method = "roi4_mask_descent_second"
-        session.before_mean = None
-        session.after_mean = None
-        session.roi2_diff = None
-        session.roi4_after_selector_applied = True
-        session.roi4_after_frame_index = int(selected_record.frame_index)
-        session.roi4_after_method = session.after_method
-        session.roi4_candidate_area_ratio = float(selected_metrics["candidate_area_ratio"]) if selected_metrics is not None else None
-        session.roi4_selector_reason = "selected"
-        self._offline_diag(
-            "roi4_after_selected",
-            point_id=session.point_id,
-            capture_source="image_matrix",
-            roi4_rect=[int(v) for v in roi4_rect],
-            frame_index=int(selected_record.frame_index),
-            frame_seq=int(selected_record.seq),
-            frame_ts=round(float(selected_record.ts), 6),
-            candidate_area_ratio=round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
-            candidate_area_ratio_threshold=round(float(area_threshold), 6),
-            block_size=int(block_size),
-            gray_diff_threshold=round(float(gray_diff_threshold), 6),
-        )
+            block_size = int(selector.get("block_size", 24))
+            gray_diff_threshold = float(selector.get("gray_diff_threshold", 15.0))
+            area_threshold = float(selector.get("candidate_area_ratio_threshold", 3.0))
+            descent_low_frame_number = int(selector.get("descent_low_frame_number", 2))
+            if block_size <= 0:
+                raise ValueError("ROI4 block_size must be > 0")
+            if gray_diff_threshold <= 0.0:
+                raise ValueError("ROI4 gray_diff_threshold must be > 0")
+            if area_threshold <= 0.0:
+                raise ValueError("ROI4 candidate_area_ratio_threshold must be > 0")
+            if descent_low_frame_number <= 0:
+                raise ValueError("ROI4 descent_low_frame_number must be > 0")
+
+            baseline = session.initial_before_record
+            self._offline_diag(
+                "roi4_after_selector_begin",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                original_after_method=session.after_method,
+                original_after_seq=int(session.after_seq) if session.after_seq is not None else None,
+                configured_roi4_rect=[int(v) for v in self._config.roi4_rect],
+                baseline_frame_index=int(baseline.frame_index),
+                baseline_seq=int(baseline.seq),
+                buffered_frame_count=len(session.frame_buffer),
+                block_size=int(block_size),
+                gray_diff_threshold=round(float(gray_diff_threshold), 6),
+                candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                descent_low_frame_number=int(descent_low_frame_number),
+            )
+            roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, baseline.frame)
+            session.roi4_rect = roi4_rect
+            session.roi4_candidate_area_ratio_threshold = area_threshold
+            session.roi4_after_selector_applied = False
+            session.roi4_after_frame_index = None
+            session.roi4_after_method = None
+            session.roi4_selector_reason = "no_low_high_low_sequence"
+
+            seen_low_before_high = False
+            seen_high = False
+            low_after_high_count = 0
+            selected_record = None
+            selected_metrics = None
+            last_metrics = None
+            scanned_frame_count = 0
+
+            for record in session.frame_buffer:
+                if int(record.frame_index) <= int(baseline.frame_index):
+                    continue
+                scanned_frame_count += 1
+                metrics = compute_roi4_mask_metrics(
+                    baseline.frame,
+                    record.frame,
+                    roi4_rect,
+                    block_size=block_size,
+                    gray_diff_threshold=gray_diff_threshold,
+                )
+                last_metrics = metrics
+                ratio = float(metrics["candidate_area_ratio"])
+                if not seen_high:
+                    if ratio < area_threshold:
+                        if not seen_low_before_high:
+                            self._offline_diag(
+                                "roi4_after_selector_initial_low",
+                                point_id=session.point_id,
+                                capture_source="image_matrix",
+                                frame_index=int(record.frame_index),
+                                frame_seq=int(record.seq),
+                                candidate_area_ratio=round(float(ratio), 6),
+                                candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                            )
+                        seen_low_before_high = True
+                        continue
+                    if seen_low_before_high and ratio >= area_threshold:
+                        seen_high = True
+                        low_after_high_count = 0
+                        self._offline_diag(
+                            "roi4_after_selector_high_enter",
+                            point_id=session.point_id,
+                            capture_source="image_matrix",
+                            frame_index=int(record.frame_index),
+                            frame_seq=int(record.seq),
+                            candidate_area_ratio=round(float(ratio), 6),
+                            candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                            candidate_block_count=int(metrics["candidate_block_count"]),
+                            largest_area_ratio=round(float(metrics["largest_area_ratio"]), 6),
+                            largest_mean_diff=round(float(metrics["largest_mean_diff"]), 6),
+                            max_diff=round(float(metrics["max_diff"]), 6),
+                        )
+                    continue
+
+                if ratio < area_threshold:
+                    low_after_high_count += 1
+                    self._offline_diag(
+                        "roi4_after_selector_descent_low",
+                        point_id=session.point_id,
+                        capture_source="image_matrix",
+                        frame_index=int(record.frame_index),
+                        frame_seq=int(record.seq),
+                        candidate_area_ratio=round(float(ratio), 6),
+                        candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                        low_after_high_count=int(low_after_high_count),
+                        target_low_count=int(descent_low_frame_number),
+                    )
+                    if low_after_high_count >= descent_low_frame_number:
+                        selected_record = record
+                        selected_metrics = metrics
+                        break
+                else:
+                    if low_after_high_count > 0:
+                        self._offline_diag(
+                            "roi4_after_selector_descent_reset",
+                            point_id=session.point_id,
+                            capture_source="image_matrix",
+                            frame_index=int(record.frame_index),
+                            frame_seq=int(record.seq),
+                            candidate_area_ratio=round(float(ratio), 6),
+                            previous_low_after_high_count=int(low_after_high_count),
+                        )
+                    low_after_high_count = 0
+
+            if selected_record is None:
+                if last_metrics is not None:
+                    session.roi4_candidate_area_ratio = float(last_metrics["candidate_area_ratio"])
+                self._offline_diag(
+                    "roi4_after_selector_no_match",
+                    point_id=session.point_id,
+                    capture_source="image_matrix",
+                    reason="no_low_high_low_sequence",
+                    scanned_frame_count=int(scanned_frame_count),
+                    seen_low_before_high=bool(seen_low_before_high),
+                    seen_high=bool(seen_high),
+                    low_after_high_count=int(low_after_high_count),
+                    last_candidate_area_ratio=round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
+                    candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                )
+                return
+
+            session.before = np.array(baseline.frame, copy=True)
+            session.before_seq = int(baseline.seq)
+            session.before_ts = float(baseline.ts)
+            session.before_name = format_frame_timestamp(baseline.ts)
+            session.after = np.array(selected_record.frame, copy=True)
+            session.after_seq = int(selected_record.seq)
+            session.after_ts = float(selected_record.ts)
+            session.after_name = format_frame_timestamp(selected_record.ts)
+            session.after_method = "roi4_mask_descent_second"
+            session.before_mean = None
+            session.after_mean = None
+            session.roi2_diff = None
+            session.roi4_after_selector_applied = True
+            session.roi4_after_frame_index = int(selected_record.frame_index)
+            session.roi4_after_method = session.after_method
+            session.roi4_candidate_area_ratio = float(selected_metrics["candidate_area_ratio"]) if selected_metrics is not None else None
+            session.roi4_selector_reason = "selected"
+            self._offline_diag(
+                "roi4_after_selected",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                roi4_rect=[int(v) for v in roi4_rect],
+                frame_index=int(selected_record.frame_index),
+                frame_seq=int(selected_record.seq),
+                frame_ts=round(float(selected_record.ts), 6),
+                candidate_area_ratio=round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
+                candidate_area_ratio_threshold=round(float(area_threshold), 6),
+                block_size=int(block_size),
+                gray_diff_threshold=round(float(gray_diff_threshold), 6),
+            )
+        except Exception as exc:
+            self._offline_diag(
+                "roi4_after_selector_failed",
+                level="error",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                after_method=session.after_method,
+                configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
+                error=str(exc),
+            )
+            raise
 
     def _apply_roi3_overrides(self, session: OfflineSession) -> None:
         if session.final_roi2_color != "red" or session.roi3_rect is None:
