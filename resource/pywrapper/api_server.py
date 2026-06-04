@@ -52,12 +52,19 @@ SCREENSHOT_LOCK = threading.Lock()
 ROI1_MARKER_COLOR = (255, 0, 0)
 ROI2_MARKER_COLOR = (0, 255, 0)
 ROI3_MARKER_COLOR = (255, 255, 0)
+ROI4_MARKER_COLOR = (255, 165, 0)
 FOCUS_MARKER_COLOR = (128, 0, 128)
 DIFFER_MARKER_WIDTH = 3
 FOCUS_MARKER_RADIUS = 3
 GUIDE_LINE_COLOR = (0, 255, 0)
 GUIDE_LINE_WIDTH = 3
 GUIDE_LINE_ANGLE_DEGREES = 100.0
+ROI4_FALLBACK_AFTER_METHODS = {
+    "roi1_boundary_after2_fallback_last",
+    "stop_fallback",
+    "stop_fallback_timeout",
+    "final_fallback",
+}
 
 
 class StateInfo(ctypes.Structure):
@@ -98,7 +105,15 @@ class OfflineConfig:
     peak_detect_enabled: bool = False
     roi2_extension_params: dict = field(default_factory=lambda: {"left": 40, "right": 40, "top": 50, "bottom": 30})
     roi3_extension_params: dict = field(default_factory=lambda: {"left": 30, "right": 30, "top": 50, "bottom": 100})
+    roi4_rect: Optional[Tuple[int, int, int, int]] = None
     difference_threshold: float = 0.5
+    roi4_after_selector: dict = field(default_factory=lambda: {
+        "enabled": False,
+        "block_size": 24,
+        "gray_diff_threshold": 15.0,
+        "candidate_area_ratio_threshold": 3.0,
+        "descent_low_frame_number": 2,
+    })
     roi3_g1_g2_override: dict = field(default_factory=lambda: {"enabled": True, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": True})
     roi3_column_diff_override: dict = field(default_factory=lambda: {"enabled": True, "g1_threshold": 99.0, "threshold": 15.0, "use_peak_max": True})
     offline_peak_enabled: bool = False
@@ -145,6 +160,7 @@ class OfflineSession:
     capture_done_event: threading.Event = field(default_factory=threading.Event)
     finished_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
+    initial_before_record: Optional[OfflineFrameRecord] = None
     before: Optional[np.ndarray] = None
     before_seq: Optional[int] = None
     before_ts: Optional[float] = None
@@ -157,6 +173,7 @@ class OfflineSession:
     focus_anchor: Optional[Tuple[int, int]] = None
     roi2_rect: Optional[Tuple[int, int, int, int]] = None
     roi3_rect: Optional[Tuple[int, int, int, int]] = None
+    roi4_rect: Optional[Tuple[int, int, int, int]] = None
     before_mean: Optional[float] = None
     after_mean: Optional[float] = None
     roi2_diff: Optional[float] = None
@@ -167,6 +184,12 @@ class OfflineSession:
     roi3_override_method: Optional[str] = None
     roi3_override_frame_index: Optional[int] = None
     roi3_override_tag: Optional[str] = None
+    roi4_after_selector_applied: bool = False
+    roi4_after_frame_index: Optional[int] = None
+    roi4_after_method: Optional[str] = None
+    roi4_candidate_area_ratio: Optional[float] = None
+    roi4_candidate_area_ratio_threshold: Optional[float] = None
+    roi4_selector_reason: Optional[str] = None
     final_roi2_color: str = "red"
     response: dict = field(default_factory=dict)
     frame_buffer: list[OfflineFrameRecord] = field(default_factory=list)
@@ -495,6 +518,118 @@ def compute_roi3_metrics(image: np.ndarray, rect: Tuple[int, int, int, int]) -> 
     }
 
 
+def validate_roi4_rect_for_image(
+    rect: Tuple[int, int, int, int],
+    image: np.ndarray,
+) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    height, width = np.asarray(image).shape[:2]
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"invalid ROI4 rect={rect}")
+    if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+        raise ValueError(f"ROI4 rect outside image bounds rect={rect} size={(width, height)}")
+    return x1, y1, x2, y2
+
+
+def compute_roi4_mask_metrics(
+    before: np.ndarray,
+    after: np.ndarray,
+    rect: Tuple[int, int, int, int],
+    block_size: int,
+    gray_diff_threshold: float,
+) -> dict:
+    if block_size <= 0:
+        raise ValueError(f"ROI4 block_size must be > 0, got {block_size}")
+    threshold = float(gray_diff_threshold)
+    if threshold <= 0.0:
+        raise ValueError(f"ROI4 gray_diff_threshold must be > 0, got {gray_diff_threshold}")
+    before_arr = np.asarray(before)
+    after_arr = np.asarray(after)
+    if before_arr.shape[:2] != after_arr.shape[:2]:
+        raise ValueError(f"ROI4 before/after image size mismatch before={before_arr.shape[:2]} after={after_arr.shape[:2]}")
+    x1, y1, x2, y2 = validate_roi4_rect_for_image(rect, before_arr)
+    validate_roi4_rect_for_image(rect, after_arr)
+
+    before_gray = gray_image(before_arr[y1:y2, x1:x2])
+    after_gray = gray_image(after_arr[y1:y2, x1:x2])
+    height, width = before_gray.shape[:2]
+    roi_area = int(width * height)
+    if roi_area <= 0:
+        raise ValueError(f"empty ROI4 rect={rect}")
+
+    cols = int(math.ceil(width / float(block_size)))
+    rows = int(math.ceil(height / float(block_size)))
+    diffs: list[float] = []
+    areas: list[int] = []
+    mask: list[int] = []
+
+    for gy in range(rows):
+        for gx in range(cols):
+            bx1 = gx * block_size
+            by1 = gy * block_size
+            bx2 = min(bx1 + block_size, width)
+            by2 = min(by1 + block_size, height)
+            area = int((bx2 - bx1) * (by2 - by1))
+            before_mean = float(np.mean(before_gray[by1:by2, bx1:bx2]))
+            after_mean = float(np.mean(after_gray[by1:by2, bx1:bx2]))
+            diff = after_mean - before_mean
+            diffs.append(diff)
+            areas.append(area)
+            mask.append(1 if diff > threshold else 0)
+
+    candidate_area = int(sum(area for area, active in zip(areas, mask) if active))
+    candidate_block_count = int(sum(mask))
+    largest_indices = find_largest_roi4_component(mask, cols, rows)
+    largest_area = int(sum(areas[idx] for idx in largest_indices))
+    largest_mean_diff = (
+        float(sum(diffs[idx] for idx in largest_indices) / len(largest_indices))
+        if largest_indices
+        else 0.0
+    )
+
+    return {
+        "candidate_block_count": candidate_block_count,
+        "candidate_area_ratio": float(candidate_area / roi_area * 100.0),
+        "largest_area_ratio": float(largest_area / roi_area * 100.0),
+        "largest_mean_diff": largest_mean_diff,
+        "max_diff": float(max(diffs)) if diffs else 0.0,
+        "min_diff": float(min(diffs)) if diffs else 0.0,
+        "cols": cols,
+        "rows": rows,
+    }
+
+
+def find_largest_roi4_component(mask: list[int], cols: int, rows: int) -> set[int]:
+    visited = [False] * len(mask)
+    largest: set[int] = set()
+    directions = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    for index, active in enumerate(mask):
+        if active != 1 or visited[index]:
+            continue
+        current_set: set[int] = set()
+        queue = [index]
+        visited[index] = True
+        head = 0
+        while head < len(queue):
+            current = queue[head]
+            head += 1
+            current_set.add(current)
+            cx = current % cols
+            cy = current // cols
+            for dx, dy in directions:
+                nx = cx + dx
+                ny = cy + dy
+                if nx < 0 or nx >= cols or ny < 0 or ny >= rows:
+                    continue
+                ni = ny * cols + nx
+                if mask[ni] == 1 and not visited[ni]:
+                    visited[ni] = True
+                    queue.append(ni)
+        if len(current_set) > len(largest):
+            largest = current_set
+    return largest
+
+
 def positive_diff_image(before: np.ndarray, after: np.ndarray) -> np.ndarray:
     before_arr = np.asarray(before, dtype=np.float32)
     after_arr = np.asarray(after, dtype=np.float32)
@@ -630,6 +765,8 @@ def draw_differ_roi_markers(
         draw_marker_rect(draw, image_size, session.roi2_rect, ROI2_MARKER_COLOR)
     if session.roi3_rect is not None:
         draw_marker_rect(draw, image_size, session.roi3_rect, ROI3_MARKER_COLOR)
+    if session.roi4_rect is not None:
+        draw_marker_rect(draw, image_size, session.roi4_rect, ROI4_MARKER_COLOR)
     if session.focus_anchor is not None:
         draw_focus_marker(draw, image_size, session.focus_anchor)
 
@@ -703,14 +840,33 @@ def build_diff_overlay_judgement_lines(session: "OfflineSession", config: Offlin
         "4. ROI3(colDiff): N/A"
         if session.roi3_column_diff is None
         else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
+        "5. ROI4: N/A"
+        if session.roi4_candidate_area_ratio is None or session.roi4_candidate_area_ratio_threshold is None
+        else (
+            f"5. ROI4: cand={float(session.roi4_candidate_area_ratio):.2f}% / "
+            f"thr={float(session.roi4_candidate_area_ratio_threshold):.2f}% frame={session.roi4_after_frame_index}"
+        ),
     ]
     line_ok = [
         roi2_ok,
         roi2_ok,
         bool(session.roi3_override_method == "roi3_g1_g2"),
         bool(session.roi3_override_method == "roi3_column_diff"),
+        bool(session.roi4_after_selector_applied),
     ]
     return lines, line_ok
+
+
+def build_roi4_diagnostics(session: "OfflineSession") -> dict:
+    return {
+        "roi4_rect": [int(v) for v in session.roi4_rect] if session.roi4_rect is not None else None,
+        "roi4_after_selector_applied": bool(session.roi4_after_selector_applied),
+        "roi4_after_frame_index": int(session.roi4_after_frame_index) if session.roi4_after_frame_index is not None else None,
+        "roi4_after_method": session.roi4_after_method,
+        "roi4_candidate_area_ratio": round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
+        "roi4_candidate_area_ratio_threshold": round(float(session.roi4_candidate_area_ratio_threshold), 6) if session.roi4_candidate_area_ratio_threshold is not None else None,
+        "roi4_selector_reason": session.roi4_selector_reason,
+    }
 
 
 def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -> Optional[np.ndarray]:
@@ -823,6 +979,59 @@ def load_offline_config(logger: logging.Logger) -> OfflineConfig:
     return parse_offline_config(settings, logger)
 
 
+def parse_roi4_rect(peak: dict, selector_enabled: bool) -> Optional[Tuple[int, int, int, int]]:
+    raw = peak.get("roi4_rect")
+    if raw is None:
+        if selector_enabled:
+            raise ValueError("settings.peak_detect.roi4_rect is required when roi4_after_selector.enabled=true")
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("settings.peak_detect.roi4_rect must be an object")
+    for key in ("x", "y", "width", "height"):
+        if key not in raw:
+            raise ValueError(f"settings.peak_detect.roi4_rect.{key} is required")
+    x = int(raw["x"])
+    y = int(raw["y"])
+    width = int(raw["width"])
+    height = int(raw["height"])
+    if width <= 0 or height <= 0:
+        raise ValueError("settings.peak_detect.roi4_rect width and height must be > 0")
+    if x < 0 or y < 0:
+        raise ValueError("settings.peak_detect.roi4_rect x and y must be >= 0")
+    return x, y, x + width, y + height
+
+
+def parse_roi4_after_selector(peak: dict) -> dict:
+    raw = peak.get("roi4_after_selector")
+    defaults = {
+        "enabled": False,
+        "block_size": 24,
+        "gray_diff_threshold": 15.0,
+        "candidate_area_ratio_threshold": 3.0,
+        "descent_low_frame_number": 2,
+    }
+    if raw is None:
+        return defaults
+    if not isinstance(raw, dict):
+        raise ValueError("settings.peak_detect.roi4_after_selector must be an object")
+    result = dict(defaults)
+    result.update(raw)
+    result["enabled"] = bool(result.get("enabled", False))
+    result["block_size"] = int(result["block_size"])
+    result["gray_diff_threshold"] = float(result["gray_diff_threshold"])
+    result["candidate_area_ratio_threshold"] = float(result["candidate_area_ratio_threshold"])
+    result["descent_low_frame_number"] = int(result["descent_low_frame_number"])
+    if result["block_size"] <= 0:
+        raise ValueError("settings.peak_detect.roi4_after_selector.block_size must be > 0")
+    if result["gray_diff_threshold"] <= 0.0:
+        raise ValueError("settings.peak_detect.roi4_after_selector.gray_diff_threshold must be > 0")
+    if result["candidate_area_ratio_threshold"] <= 0.0:
+        raise ValueError("settings.peak_detect.roi4_after_selector.candidate_area_ratio_threshold must be > 0")
+    if result["descent_low_frame_number"] <= 0:
+        raise ValueError("settings.peak_detect.roi4_after_selector.descent_low_frame_number must be > 0")
+    return result
+
+
 def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfig:
     screenshot_cfg = settings.get("offline_screenshot_test")
     if not isinstance(screenshot_cfg, dict):
@@ -839,6 +1048,8 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     roi3_ext = peak.get("roi3_extension_params")
     if not isinstance(roi3_ext, dict):
         raise ValueError("settings.peak_detect.roi3_extension_params is required for OFFLINE")
+    roi4_after_selector = parse_roi4_after_selector(peak)
+    roi4_rect = parse_roi4_rect(peak, bool(roi4_after_selector.get("enabled", False)))
     threshold = peak.get("difference_threshold")
     if threshold is None:
         raise ValueError("settings.peak_detect.difference_threshold is required for OFFLINE")
@@ -881,7 +1092,9 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         peak_detect_enabled=True,
         roi2_extension_params=dict(roi2_ext),
         roi3_extension_params=dict(roi3_ext),
+        roi4_rect=roi4_rect,
         difference_threshold=float(threshold),
+        roi4_after_selector=roi4_after_selector,
         roi3_g1_g2_override=dict(g1g2_override) if isinstance(g1g2_override, dict) else {"enabled": True, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": True},
         roi3_column_diff_override=dict(column_override) if isinstance(column_override, dict) else {"enabled": True, "g1_threshold": 99.0, "threshold": 15.0, "use_peak_max": True},
         offline_peak_enabled=bool(peak_select.get("enabled", False)),
@@ -900,7 +1113,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     )
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
-        "roi2_extension_params=%s roi3_extension_params=%s difference_threshold=%s debug_save_enabled=%s "
+        "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
         "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
         "focus_guide_angle_degrees=%s focus_guide_line_width=%s",
         config.screenshot_test_enabled,
@@ -910,7 +1123,9 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.offline_peak_threshold,
         config.roi2_extension_params,
         config.roi3_extension_params,
+        config.roi4_rect,
         config.difference_threshold,
+        config.roi4_after_selector,
         config.debug_save_enabled,
         config.debug_save_dir,
         config.stop_wait_timeout_seconds,
@@ -1662,6 +1877,114 @@ class OfflineSessionManager:
             return None, None, None, {"roi3_mean": None, "g1": None, "g2": None, "column_diff": None}
         return session.after, None, "after", compute_roi3_metrics(session.after, session.roi3_rect)
 
+    def _apply_roi4_after_selector_if_needed(self, session: OfflineSession) -> None:
+        selector = dict(self._config.roi4_after_selector or {})
+        if not bool(selector.get("enabled", False)):
+            return
+        if session.after_method not in ROI4_FALLBACK_AFTER_METHODS:
+            return
+        if self._config.roi4_rect is None:
+            raise ValueError("ROI4 after selector requires roi4_rect")
+        if session.initial_before_record is None:
+            raise ValueError("ROI4 after selector requires initial before frame")
+        if not session.frame_buffer:
+            raise ValueError("ROI4 after selector requires buffered frames")
+
+        block_size = int(selector.get("block_size", 24))
+        gray_diff_threshold = float(selector.get("gray_diff_threshold", 15.0))
+        area_threshold = float(selector.get("candidate_area_ratio_threshold", 3.0))
+        descent_low_frame_number = int(selector.get("descent_low_frame_number", 2))
+        if block_size <= 0:
+            raise ValueError("ROI4 block_size must be > 0")
+        if gray_diff_threshold <= 0.0:
+            raise ValueError("ROI4 gray_diff_threshold must be > 0")
+        if area_threshold <= 0.0:
+            raise ValueError("ROI4 candidate_area_ratio_threshold must be > 0")
+        if descent_low_frame_number <= 0:
+            raise ValueError("ROI4 descent_low_frame_number must be > 0")
+
+        baseline = session.initial_before_record
+        roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, baseline.frame)
+        session.roi4_rect = roi4_rect
+        session.roi4_candidate_area_ratio_threshold = area_threshold
+        session.roi4_after_selector_applied = False
+        session.roi4_after_frame_index = None
+        session.roi4_after_method = None
+        session.roi4_selector_reason = "no_low_high_low_sequence"
+
+        seen_low_before_high = False
+        seen_high = False
+        low_after_high_count = 0
+        selected_record = None
+        selected_metrics = None
+        last_metrics = None
+
+        for record in session.frame_buffer:
+            if int(record.frame_index) <= int(baseline.frame_index):
+                continue
+            metrics = compute_roi4_mask_metrics(
+                baseline.frame,
+                record.frame,
+                roi4_rect,
+                block_size=block_size,
+                gray_diff_threshold=gray_diff_threshold,
+            )
+            last_metrics = metrics
+            ratio = float(metrics["candidate_area_ratio"])
+            if not seen_high:
+                if ratio < area_threshold:
+                    seen_low_before_high = True
+                    continue
+                if seen_low_before_high and ratio >= area_threshold:
+                    seen_high = True
+                    low_after_high_count = 0
+                continue
+
+            if ratio < area_threshold:
+                low_after_high_count += 1
+                if low_after_high_count >= descent_low_frame_number:
+                    selected_record = record
+                    selected_metrics = metrics
+                    break
+            else:
+                low_after_high_count = 0
+
+        if selected_record is None:
+            if last_metrics is not None:
+                session.roi4_candidate_area_ratio = float(last_metrics["candidate_area_ratio"])
+            return
+
+        session.before = np.array(baseline.frame, copy=True)
+        session.before_seq = int(baseline.seq)
+        session.before_ts = float(baseline.ts)
+        session.before_name = format_frame_timestamp(baseline.ts)
+        session.after = np.array(selected_record.frame, copy=True)
+        session.after_seq = int(selected_record.seq)
+        session.after_ts = float(selected_record.ts)
+        session.after_name = format_frame_timestamp(selected_record.ts)
+        session.after_method = "roi4_mask_descent_second"
+        session.before_mean = None
+        session.after_mean = None
+        session.roi2_diff = None
+        session.roi4_after_selector_applied = True
+        session.roi4_after_frame_index = int(selected_record.frame_index)
+        session.roi4_after_method = session.after_method
+        session.roi4_candidate_area_ratio = float(selected_metrics["candidate_area_ratio"]) if selected_metrics is not None else None
+        session.roi4_selector_reason = "selected"
+        self._offline_diag(
+            "roi4_after_selected",
+            point_id=session.point_id,
+            capture_source="image_matrix",
+            roi4_rect=[int(v) for v in roi4_rect],
+            frame_index=int(selected_record.frame_index),
+            frame_seq=int(selected_record.seq),
+            frame_ts=round(float(selected_record.ts), 6),
+            candidate_area_ratio=round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
+            candidate_area_ratio_threshold=round(float(area_threshold), 6),
+            block_size=int(block_size),
+            gray_diff_threshold=round(float(gray_diff_threshold), 6),
+        )
+
     def _apply_roi3_overrides(self, session: OfflineSession) -> None:
         if session.final_roi2_color != "red" or session.roi3_rect is None:
             return
@@ -1770,6 +2093,7 @@ class OfflineSessionManager:
         meta["focus_anchor"] = [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None
         meta["roi2_rect"] = [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None
         meta["roi3_rect"] = [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None
+        meta.update(build_roi4_diagnostics(session))
         if session.before is not None and session.roi2_rect is not None and session.roi3_rect is not None:
             self._debug_saver.save_stage(session.debug_dir, "before", session.before, session.roi2_rect, session.roi3_rect)
             write_png(Path(session.debug_dir) / "final_before.png", session.before)
@@ -1792,6 +2116,7 @@ class OfflineSessionManager:
             "roi3_override_method": session.roi3_override_method,
             "roi3_override_frame_index": session.roi3_override_frame_index,
             "roi3_override_tag": session.roi3_override_tag,
+            **build_roi4_diagnostics(session),
         }
         self._debug_saver.write_meta(session.debug_dir, meta)
 
@@ -1930,6 +2255,7 @@ class OfflineSessionManager:
             session.response["roi2_before_mean"] = round(float(session.before_mean), 6)
         if session.after_mean is not None and "roi2_after_mean" not in session.response:
             session.response["roi2_after_mean"] = round(float(session.after_mean), 6)
+        session.response.update(build_roi4_diagnostics(session))
 
     def _run_session(self, session: OfflineSession) -> None:
         timed_out = False
@@ -1992,6 +2318,7 @@ class OfflineSessionManager:
                     before_default = frame_image
                     before_default_seq = frame.seq
                     before_default_ts = frame.ts
+                    session.initial_before_record = frame_record
                 if session.before is None:
                     session.before = frame_image
                     session.before_seq = frame.seq
@@ -2107,6 +2434,18 @@ class OfflineSessionManager:
                 buffered_frame_count=len(session.frame_buffer),
             )
 
+            if self._config.roi4_rect is not None and session.before is not None:
+                session.roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, session.before)
+            try:
+                self._apply_roi4_after_selector_if_needed(session)
+            except Exception as exc:
+                pending_error_response = {
+                    "success": False,
+                    "info": "error_in_detect",
+                    "point_id": session.point_id,
+                    "error": str(exc),
+                }
+
             session.final_roi2_color = "red"
             if session.roi2_rect is None and session.before is not None:
                 self._initialize_focus_and_rois(session, session.before)
@@ -2140,6 +2479,11 @@ class OfflineSessionManager:
                 focus_anchor=[int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None,
                 roi2_rect=[int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None,
                 roi3_rect=[int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None,
+                roi4_rect=[int(v) for v in session.roi4_rect] if session.roi4_rect is not None else None,
+                roi4_after_selector_applied=bool(session.roi4_after_selector_applied),
+                roi4_after_frame_index=int(session.roi4_after_frame_index) if session.roi4_after_frame_index is not None else None,
+                roi4_candidate_area_ratio=round(float(session.roi4_candidate_area_ratio), 6) if session.roi4_candidate_area_ratio is not None else None,
+                roi4_candidate_area_ratio_threshold=round(float(session.roi4_candidate_area_ratio_threshold), 6) if session.roi4_candidate_area_ratio_threshold is not None else None,
                 frame_shape=[int(v) for v in session.after.shape] if session.after is not None else None,
             )
 
@@ -2210,6 +2554,8 @@ class OfflineSessionManager:
                 "focus_anchor": [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None,
                 "roi2_rect": [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None,
                 "roi3_rect": [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None,
+                "before_seq": int(session.before_seq) if session.before_seq is not None else None,
+                "after_seq": int(session.after_seq) if session.after_seq is not None else None,
                 "after_method": session.after_method,
                 "roi3_g1": session.roi3_g1,
                 "roi3_g2": session.roi3_g2,
@@ -2219,6 +2565,7 @@ class OfflineSessionManager:
                 "roi3_override_frame_index": session.roi3_override_frame_index,
                 "roi3_override_tag": session.roi3_override_tag,
             }
+            session.response.update(build_roi4_diagnostics(session))
             session.response.update(result_paths)
             if session.debug_dir is not None:
                 session.response["debug_dir"] = session.debug_dir

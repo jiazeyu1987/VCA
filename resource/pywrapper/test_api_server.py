@@ -136,6 +136,11 @@ class ApiServerTests(unittest.TestCase):
             flags[db_name] = int(row[0])
         return flags
 
+    def make_roi4_frame(self, base_value: int, roi4_value: int, seq: int) -> api_server.FrameSnapshot:
+        image = np.full((520, 600, 3), base_value, dtype=np.uint8)
+        image[306:495, 16:577] = roi4_value
+        return api_server.FrameSnapshot(image, seq, float(seq))
+
     def test_parse_request_accepts_existing_protocol(self):
         parsed = api_server.parse_request('ONLINE;31415;{"point_id": 123}')
 
@@ -332,7 +337,15 @@ class ApiServerTests(unittest.TestCase):
                     "enabled": True,
                     "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
                     "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "roi4_rect": {"x": 16, "y": 306, "width": 561, "height": 189},
                     "difference_threshold": 1.5,
+                    "roi4_after_selector": {
+                        "enabled": True,
+                        "block_size": 24,
+                        "gray_diff_threshold": 15.0,
+                        "candidate_area_ratio_threshold": 3.0,
+                        "descent_low_frame_number": 2,
+                    },
                     "roi3_g1_g2_override": {"enabled": True, "g1_threshold": 97.0, "g2_threshold": 18.0, "use_peak_max": False},
                     "roi3_column_diff_override": {"enabled": True, "g1_threshold": 98.0, "threshold": 11.0, "use_peak_max": False},
                 },
@@ -350,6 +363,12 @@ class ApiServerTests(unittest.TestCase):
         self.assertTrue(config.peak_detect_enabled)
         self.assertEqual(config.roi2_extension_params, {"left": 11, "right": 12, "top": 13, "bottom": 14})
         self.assertEqual(config.roi3_extension_params, {"left": 21, "right": 22, "top": 23, "bottom": 24})
+        self.assertEqual(config.roi4_rect, (16, 306, 577, 495))
+        self.assertTrue(config.roi4_after_selector["enabled"])
+        self.assertEqual(config.roi4_after_selector["block_size"], 24)
+        self.assertEqual(config.roi4_after_selector["gray_diff_threshold"], 15.0)
+        self.assertEqual(config.roi4_after_selector["candidate_area_ratio_threshold"], 3.0)
+        self.assertEqual(config.roi4_after_selector["descent_low_frame_number"], 2)
         self.assertEqual(config.difference_threshold, 1.5)
         self.assertEqual(config.roi3_g1_g2_override["g1_threshold"], 97.0)
         self.assertEqual(config.roi3_column_diff_override["threshold"], 11.0)
@@ -359,6 +378,38 @@ class ApiServerTests(unittest.TestCase):
         self.assertTrue(config.screenshot_test_enabled)
         self.assertEqual(config.focus_guide_angle_degrees, 88.0)
         self.assertEqual(config.focus_guide_line_width, 5)
+
+    def test_parse_offline_config_requires_roi4_rect_when_selector_enabled(self):
+        with self.assertRaisesRegex(ValueError, "settings.peak_detect.roi4_rect is required"):
+            api_server.parse_offline_config(
+                {
+                    "peak_detect": {
+                        "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                        "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                        "difference_threshold": 1.5,
+                        "roi4_after_selector": {"enabled": True},
+                    },
+                    "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
+                },
+                self.make_null_logger("test_parse_offline_config_requires_roi4_rect_when_selector_enabled"),
+            )
+
+    def test_roi4_candidate_area_ratio_uses_exact_edge_block_area(self):
+        before = np.zeros((5, 5, 3), dtype=np.uint8)
+        after = np.zeros((5, 5, 3), dtype=np.uint8)
+        after[3:5, 3:5] = 20
+
+        metrics = api_server.compute_roi4_mask_metrics(
+            before,
+            after,
+            (0, 0, 5, 5),
+            block_size=3,
+            gray_diff_threshold=15.0,
+        )
+
+        self.assertEqual(metrics["candidate_block_count"], 1)
+        self.assertAlmostEqual(metrics["candidate_area_ratio"], 16.0)
+        self.assertAlmostEqual(metrics["largest_area_ratio"], 16.0)
 
     def test_parse_offline_config_reads_screenshot_roi_capture_region(self):
         config = api_server.parse_offline_config(
@@ -861,6 +912,95 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(stop["roi2_after_mean"], 12.0)
         self.assertEqual(stop["after_method"], "roi1_boundary_after2_fallback_last")
 
+    def test_offline_roi4_selector_replaces_fallback_after_with_second_low_frame(self):
+        frames = self.SequenceFrameSource(
+            [
+                self.make_roi4_frame(10, 10, 1),
+                self.make_roi4_frame(11, 10, 2),
+                self.make_roi4_frame(60, 80, 3),
+                self.make_roi4_frame(60, 80, 4),
+                self.make_roi4_frame(20, 10, 5),
+                self.make_roi4_frame(20, 10, 6),
+                self.make_roi4_frame(12, 10, 7),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi4_rect=(16, 306, 577, 495),
+                roi4_after_selector={
+                    "enabled": True,
+                    "block_size": 24,
+                    "gray_diff_threshold": 15.0,
+                    "candidate_area_ratio_threshold": 3.0,
+                    "descent_low_frame_number": 2,
+                },
+                difference_threshold=5.0,
+            ),
+            logger=self.make_null_logger("test_offline_roi4_selector_replaces_fallback_after_with_second_low_frame"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.1)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_color"], "green")
+        self.assertTrue(stop["roi4_after_selector_applied"])
+        self.assertEqual(stop["roi4_after_frame_index"], 6)
+        self.assertEqual(stop["roi4_after_method"], "roi4_mask_descent_second")
+        self.assertEqual(stop["after_seq"], 6)
+        self.assertEqual(stop["roi4_rect"], [16, 306, 577, 495])
+        self.assertAlmostEqual(stop["roi4_candidate_area_ratio"], 0.0)
+
+    def test_offline_roi4_selector_preserves_fallback_after_without_low_high_low_sequence(self):
+        frames = self.SequenceFrameSource(
+            [
+                self.make_roi4_frame(10, 10, 1),
+                self.make_roi4_frame(11, 10, 2),
+                self.make_roi4_frame(60, 80, 3),
+                self.make_roi4_frame(60, 80, 4),
+                self.make_roi4_frame(20, 80, 5),
+                self.make_roi4_frame(20, 80, 6),
+                self.make_roi4_frame(12, 80, 7),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi4_rect=(16, 306, 577, 495),
+                roi4_after_selector={
+                    "enabled": True,
+                    "block_size": 24,
+                    "gray_diff_threshold": 15.0,
+                    "candidate_area_ratio_threshold": 3.0,
+                    "descent_low_frame_number": 2,
+                },
+                difference_threshold=5.0,
+            ),
+            logger=self.make_null_logger("test_offline_roi4_selector_preserves_fallback_after_without_low_high_low_sequence"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.1)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertFalse(stop["roi4_after_selector_applied"])
+        self.assertEqual(stop["after_seq"], 7)
+
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
             provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
@@ -1118,6 +1258,23 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(tuple(actual[84, 80]), (0, 255, 0))
             self.assertEqual(tuple(actual[75, 80]), (255, 255, 0))
             self.assertEqual(tuple(actual[90, 80]), (128, 0, 128))
+
+    def test_offline_diff_image_draws_roi4_marker(self):
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.before = np.full((80, 100, 3), 10, dtype=np.uint8)
+        session.after = np.full((80, 100, 3), 30, dtype=np.uint8)
+        session.roi4_rect = (10, 50, 90, 75)
+
+        actual = api_server.render_diff_with_overlay(session, api_server.OfflineConfig())
+
+        self.assertIsNotNone(actual)
+        self.assert_pixel_near(actual, 10, 50, api_server.ROI4_MARKER_COLOR)
+        self.assert_pixel_near(actual, 89, 74, api_server.ROI4_MARKER_COLOR)
 
     def test_offline_final_images_draw_focus_guides_on_before_after_and_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
