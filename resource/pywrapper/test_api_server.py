@@ -172,7 +172,7 @@ class ApiServerTests(unittest.TestCase):
 
     def make_roi4_manager(self, logger=None, roi4_rect=(16, 306, 577, 495)):
         return api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -421,7 +421,7 @@ class ApiServerTests(unittest.TestCase):
                 },
                 "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
                 "offline_stop_wait_timeout_seconds": 8.0,
-                "focus_guides": {"angle_degrees": 88.0, "line_width": 5},
+                "focus_guides": {"angle_degrees": 88.0, "line_width": 5, "y_offset_mm": 2.5},
             },
             self.make_null_logger("test_parse_offline_config_reads_roi_and_debug_settings"),
         )
@@ -448,6 +448,23 @@ class ApiServerTests(unittest.TestCase):
         self.assertTrue(config.screenshot_test_enabled)
         self.assertEqual(config.focus_guide_angle_degrees, 88.0)
         self.assertEqual(config.focus_guide_line_width, 5)
+        self.assertEqual(config.focus_y_offset_mm, 2.5)
+
+    def test_parse_offline_config_defaults_focus_y_offset_to_one_mm(self):
+        config = api_server.parse_offline_config(
+            {
+                "peak_detect": {
+                    "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                    "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "difference_threshold": 1.5,
+                    "roi4_after_selector": {"enabled": False},
+                },
+                "offline_tmp_frames": {"enabled": False, "dir": "D:/software_data/tmp"},
+            },
+            self.make_null_logger("test_parse_offline_config_defaults_focus_y_offset_to_one_mm"),
+        )
+
+        self.assertEqual(config.focus_y_offset_mm, 1.0)
 
     def test_parse_offline_config_requires_roi4_rect_when_selector_enabled(self):
         with self.assertRaisesRegex(ValueError, "settings.peak_detect.roi4_rect is required"):
@@ -525,7 +542,7 @@ class ApiServerTests(unittest.TestCase):
 
     def test_offline_requires_time_out_and_is_save_fields(self):
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=lambda: None,
             config=api_server.OfflineConfig.default(),
             logger=self.make_null_logger("test_offline_requires_time_out_and_is_save_fields"),
@@ -542,7 +559,7 @@ class ApiServerTests(unittest.TestCase):
 
     def test_offline_start_fails_without_device_frame(self):
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig.default(),
             logger=self.make_null_logger("test_offline_start_fails_without_device_frame"),
@@ -560,7 +577,7 @@ class ApiServerTests(unittest.TestCase):
     def test_offline_start_logs_missing_frame_diagnostics(self):
         logger, stream = self.make_stream_logger("test_offline_start_logs_missing_frame_diagnostics")
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig.default(),
             logger=logger,
@@ -602,7 +619,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
         ])
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -635,7 +652,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
         ])
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -667,7 +684,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(np.full((20, 20, 3), 12, dtype=np.uint8), 2, 2.0),
         ])
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -691,7 +708,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
         ]
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=lambda: frames.pop(0),
             config=api_server.OfflineConfig(
                 peak_detect_enabled=False,
@@ -716,7 +733,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(after, 2, 2.0),
         ]
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "1000"},
             frame_fetcher=lambda: frames.pop(0),
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -753,7 +770,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -796,7 +813,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -842,7 +859,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -876,7 +893,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -910,7 +927,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -959,7 +976,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -995,7 +1012,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1042,7 +1059,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1147,7 +1164,7 @@ class ApiServerTests(unittest.TestCase):
 
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig.default(),
             logger=self.make_null_logger("test_offline_switch_waits_for_previous_capture_done_before_new_start"),
@@ -1183,7 +1200,7 @@ class ApiServerTests(unittest.TestCase):
     def test_offline_switch_logs_wait_details(self):
         logger, stream = self.make_stream_logger("test_offline_switch_logs_wait_details")
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig.default(),
             logger=logger,
@@ -1224,7 +1241,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1269,7 +1286,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1307,7 +1324,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(40, 40)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(40, 40)", "depth": "80"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1379,7 +1396,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(80, 90)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(80, 90)", "depth": "16"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1401,7 +1418,7 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(tuple(actual[0, 0]), (255, 0, 0))
             self.assertEqual(tuple(actual[84, 80]), (0, 255, 0))
             self.assertEqual(tuple(actual[75, 80]), (255, 255, 0))
-            self.assertEqual(tuple(actual[90, 80]), (128, 0, 128))
+            self.assertEqual(tuple(actual[100, 80]), (128, 0, 128))
 
     def test_offline_diff_image_draws_roi4_marker(self):
         session = api_server.OfflineSession(
@@ -1429,7 +1446,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)", "depth": "20"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1451,14 +1468,15 @@ class ApiServerTests(unittest.TestCase):
             after_actual = np.array(api_server.Image.open(Path(stop["after_path"])))
             diff_actual = np.array(api_server.Image.open(Path(stop["diff_path"])))
             guide_x = int(round(100 - np.sin(np.deg2rad(50.0)) * 30.0))
-            guide_y = int(round(150 - np.cos(np.deg2rad(50.0)) * 30.0))
+            shifted_focus_y = 160
+            guide_y = int(round(shifted_focus_y - np.cos(np.deg2rad(50.0)) * 30.0))
 
             self.assertEqual(tuple(before_actual[0, 0][:3]), (10, 10, 10))
             self.assertEqual(tuple(after_actual[0, 0][:3]), (30, 30, 30))
             for actual in (before_actual, after_actual, diff_actual):
                 self.assert_pixel_near(actual, guide_x, guide_y, (0, 255, 0))
-            self.assertEqual(tuple(before_actual[150, 100][:3]), (128, 0, 128))
-            self.assertEqual(tuple(after_actual[150, 100][:3]), (128, 0, 128))
+            self.assertEqual(tuple(before_actual[shifted_focus_y, 100][:3]), (128, 0, 128))
+            self.assertEqual(tuple(after_actual[shifted_focus_y, 100][:3]), (128, 0, 128))
 
     def test_offline_final_images_use_configured_focus_guide_angle_and_width(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1469,7 +1487,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(100, 150)", "depth": "20"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1491,12 +1509,69 @@ class ApiServerTests(unittest.TestCase):
 
             before_actual = np.array(api_server.Image.open(Path(stop["before_path"])))
             guide_x = int(round(100 - np.sin(np.deg2rad(30.0)) * 30.0))
-            guide_y = int(round(150 - np.cos(np.deg2rad(30.0)) * 30.0))
+            shifted_focus_y = 160
+            guide_y = int(round(shifted_focus_y - np.cos(np.deg2rad(30.0)) * 30.0))
             wide_x = int(round(guide_x - np.cos(np.deg2rad(30.0)) * 3.0))
             wide_y = int(round(guide_y + np.sin(np.deg2rad(30.0)) * 3.0))
 
             self.assert_pixel_near(before_actual, guide_x, guide_y, (0, 255, 0), radius=1)
             self.assert_pixel_near(before_actual, wide_x, wide_y, (0, 255, 0), radius=1)
+
+    def test_focus_overlay_uses_default_one_mm_downward_offset(self):
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.focus_anchor = (80, 80)
+        session.focus_depth_mm = 20.0
+        frame = np.zeros((200, 200, 3), dtype=np.uint8)
+
+        actual = api_server.render_frame_with_focus_guides(frame, session, api_server.OfflineConfig())
+
+        self.assert_pixel_near(actual, 80, 90, api_server.FOCUS_MARKER_COLOR, radius=1)
+        guide_x = int(round(80 - np.sin(np.deg2rad(50.0)) * 20.0))
+        guide_y = int(round(90 - np.cos(np.deg2rad(50.0)) * 20.0))
+        self.assert_pixel_near(actual, guide_x, guide_y, api_server.GUIDE_LINE_COLOR, radius=1)
+
+    def test_focus_overlay_uses_configured_mm_offset_without_moving_roi_anchor(self):
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.focus_anchor = (100, 100)
+        session.focus_depth_mm = 100.0
+        session.roi2_rect = api_server.compute_roi_region(
+            (200, 200),
+            session.focus_anchor,
+            {"left": 5, "right": 5, "top": 6, "bottom": 6},
+        )
+        frame = np.zeros((200, 200, 3), dtype=np.uint8)
+
+        actual = api_server.render_frame_with_focus_guides(
+            frame,
+            session,
+            api_server.OfflineConfig(focus_y_offset_mm=2.5),
+        )
+
+        self.assertEqual(session.roi2_rect, (95, 94, 105, 106))
+        self.assert_pixel_near(actual, 100, 105, api_server.FOCUS_MARKER_COLOR, radius=1)
+
+    def test_focus_overlay_positive_offset_requires_provider_depth(self):
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.focus_anchor = (80, 80)
+        frame = np.zeros((200, 200, 3), dtype=np.uint8)
+
+        with self.assertRaisesRegex(ValueError, "provider depth"):
+            api_server.render_frame_with_focus_guides(frame, session, api_server.OfflineConfig())
 
     def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
         before = np.zeros((4, 4, 4), dtype=np.uint8)
@@ -1525,7 +1600,7 @@ class ApiServerTests(unittest.TestCase):
                 ]
             )
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1567,7 +1642,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1605,7 +1680,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1645,7 +1720,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1675,7 +1750,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1706,7 +1781,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1745,7 +1820,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 4, 4.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1785,7 +1860,7 @@ class ApiServerTests(unittest.TestCase):
             api_server.FrameSnapshot(np.full((20, 20, 3), 12, dtype=np.uint8), 2, 2.0),
         ])
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=frames,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1818,7 +1893,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=frames,
                 config=api_server.OfflineConfig(
                     peak_detect_enabled=True,
@@ -1861,7 +1936,7 @@ class ApiServerTests(unittest.TestCase):
                 api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
             ]
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
                 frame_fetcher=lambda: frames.pop(0),
                 config=api_server.OfflineConfig(
                     roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
@@ -1883,7 +1958,7 @@ class ApiServerTests(unittest.TestCase):
     def test_offline_start_fails_when_roi3_is_out_of_bounds(self):
         frame = api_server.FrameSnapshot(np.zeros((20, 20, 3), dtype=np.uint8), 1, 1.0)
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([frame]),
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1916,7 +1991,7 @@ class ApiServerTests(unittest.TestCase):
             ]
         )
         manager = api_server.OfflineSessionManager(
-            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=frame_source,
             config=api_server.OfflineConfig(
                 peak_detect_enabled=True,
@@ -1949,7 +2024,7 @@ class ApiServerTests(unittest.TestCase):
         logger, stream = self.make_stream_logger("test_offline_screenshot_mode_uses_screenshot_capture_source_and_returns_outputs")
         with tempfile.TemporaryDirectory() as tmp:
             manager = api_server.OfflineSessionManager(
-                provider_fetcher=lambda: {"focus_point": "PointF(40, 40)"},
+                provider_fetcher=lambda: {"focus_point": "PointF(40, 40)", "depth": "1000"},
                 frame_fetcher=lambda: None,
                 config=api_server.OfflineConfig(
                     screenshot_test_enabled=True,

@@ -59,6 +59,7 @@ FOCUS_MARKER_RADIUS = 3
 GUIDE_LINE_COLOR = (0, 255, 0)
 GUIDE_LINE_WIDTH = 3
 GUIDE_LINE_ANGLE_DEGREES = 100.0
+FOCUS_Y_OFFSET_MM = 1.0
 ROI4_FALLBACK_AFTER_METHODS = {
     "roi1_boundary_after2_fallback_last",
     "stop_fallback",
@@ -129,6 +130,7 @@ class OfflineConfig:
     result_flag_path: Optional[str] = None
     focus_guide_angle_degrees: float = GUIDE_LINE_ANGLE_DEGREES
     focus_guide_line_width: int = GUIDE_LINE_WIDTH
+    focus_y_offset_mm: float = FOCUS_Y_OFFSET_MM
 
     @staticmethod
     def default() -> "OfflineConfig":
@@ -171,6 +173,7 @@ class OfflineSession:
     after_name: str = ""
     after_method: Optional[str] = None
     focus_anchor: Optional[Tuple[int, int]] = None
+    focus_depth_mm: Optional[float] = None
     roi2_rect: Optional[Tuple[int, int, int, int]] = None
     roi3_rect: Optional[Tuple[int, int, int, int]] = None
     roi4_rect: Optional[Tuple[int, int, int, int]] = None
@@ -416,6 +419,28 @@ def parse_focus_point(value) -> Optional[Tuple[int, int]]:
         return int(float(match.group(1))), int(float(match.group(2)))
     except Exception:
         return None
+
+
+def parse_focus_depth_mm(value) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        depth_mm = float(value)
+    except Exception:
+        return None
+    if depth_mm <= 0.0:
+        return None
+    return depth_mm
+
+
+def validate_focus_y_offset_mm(value) -> float:
+    try:
+        offset_mm = float(value)
+    except Exception as exc:
+        raise ValueError(f"focus_guides.y_offset_mm must be a number, got {value}") from exc
+    if offset_mm < 0.0:
+        raise ValueError(f"focus_guides.y_offset_mm must be >= 0, got {value}")
+    return offset_mm
 
 
 def compute_roi_region(
@@ -681,6 +706,33 @@ def validate_focus_anchor(image_size: Tuple[int, int], focus_anchor: Tuple[int, 
     return x, y
 
 
+def resolve_focus_overlay_anchor(
+    image_size: Tuple[int, int],
+    session: "OfflineSession",
+    config: OfflineConfig,
+) -> Optional[Tuple[int, int]]:
+    if session.focus_anchor is None:
+        return None
+    x, y = validate_focus_anchor(image_size, session.focus_anchor)
+    offset_mm = validate_focus_y_offset_mm(config.focus_y_offset_mm)
+    if offset_mm == 0.0:
+        return x, y
+    depth_mm = session.focus_depth_mm
+    if depth_mm is None or depth_mm <= 0.0:
+        raise ValueError("provider depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
+    width, height = image_size
+    offset_px = int(round(offset_mm * float(height) / float(depth_mm)))
+    overlay_anchor = (x, y + offset_px)
+    try:
+        return validate_focus_anchor(image_size, overlay_anchor)
+    except ValueError as exc:
+        raise ValueError(
+            "focus overlay outside image bounds "
+            f"focus={session.focus_anchor} offset_mm={offset_mm} depth_mm={depth_mm} "
+            f"offset_px={offset_px} size={(width, height)}"
+        ) from exc
+
+
 def clip_focus_guide_endpoint(
     image_size: Tuple[int, int],
     focus_anchor: Tuple[int, int],
@@ -743,14 +795,17 @@ def render_frame_with_focus_guides(frame: np.ndarray, session: "OfflineSession",
     if image.mode == "L":
         image = image.convert("RGB")
     draw = ImageDraw.Draw(image)
+    overlay_anchor = resolve_focus_overlay_anchor(image.size, session, config)
+    if overlay_anchor is None:
+        return np.array(image)
     draw_focus_guide_lines(
         draw,
         image.size,
-        session.focus_anchor,
+        overlay_anchor,
         config.focus_guide_angle_degrees,
         config.focus_guide_line_width,
     )
-    draw_focus_marker(draw, image.size, session.focus_anchor)
+    draw_focus_marker(draw, image.size, overlay_anchor)
     return np.array(image)
 
 
@@ -758,6 +813,7 @@ def draw_differ_roi_markers(
     draw: ImageDraw.ImageDraw,
     image_size: Tuple[int, int],
     session: "OfflineSession",
+    focus_marker_anchor: Optional[Tuple[int, int]] = None,
 ) -> None:
     width, height = image_size
     draw_marker_rect(draw, image_size, (0, 0, width, height), ROI1_MARKER_COLOR)
@@ -767,8 +823,8 @@ def draw_differ_roi_markers(
         draw_marker_rect(draw, image_size, session.roi3_rect, ROI3_MARKER_COLOR)
     if session.roi4_rect is not None:
         draw_marker_rect(draw, image_size, session.roi4_rect, ROI4_MARKER_COLOR)
-    if session.focus_anchor is not None:
-        draw_focus_marker(draw, image_size, session.focus_anchor)
+    if focus_marker_anchor is not None:
+        draw_focus_marker(draw, image_size, focus_marker_anchor)
 
 
 def format_frame_timestamp(ts: float) -> str:
@@ -878,11 +934,12 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
         rgb = np.stack([rgb, rgb, rgb], axis=2)
     image = Image.fromarray(rgb)
     draw = ImageDraw.Draw(image)
+    focus_overlay_anchor = resolve_focus_overlay_anchor(image.size, session, config)
     if session.focus_anchor is not None:
         draw_focus_guide_lines(
             draw,
             image.size,
-            session.focus_anchor,
+            focus_overlay_anchor,
             config.focus_guide_angle_degrees,
             config.focus_guide_line_width,
         )
@@ -900,7 +957,7 @@ def render_diff_with_overlay(session: "OfflineSession", config: OfflineConfig) -
         fill = (0, 200, 0) if line_ok[idx] else (255, 0, 0)
         draw.text((20, y), line, fill=fill, font=font)
         y += 20
-    draw_differ_roi_markers(draw, image.size, session)
+    draw_differ_roi_markers(draw, image.size, session, focus_overlay_anchor)
     return np.array(image)
 
 
@@ -1082,6 +1139,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         focus_guides.get("angle_degrees", GUIDE_LINE_ANGLE_DEGREES),
         focus_guides.get("line_width", GUIDE_LINE_WIDTH),
     )
+    focus_y_offset_mm = validate_focus_y_offset_mm(focus_guides.get("y_offset_mm", FOCUS_Y_OFFSET_MM))
     image_output_dir = settings.get("image_output_dir", "D:/software_data/imgs")
     db_root_dir = settings.get("db_root_dir", "D:/software_data")
     result_flag_path = settings.get("result_flag_path", "D:/software_data/result.txt")
@@ -1110,12 +1168,13 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         result_flag_path=str(result_flag_path) if result_flag_path else None,
         focus_guide_angle_degrees=focus_guide_angle_degrees,
         focus_guide_line_width=focus_guide_line_width,
+        focus_y_offset_mm=focus_y_offset_mm,
     )
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
         "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
         "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
-        "focus_guide_angle_degrees=%s focus_guide_line_width=%s",
+        "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s",
         config.screenshot_test_enabled,
         config.screenshot_capture_bbox,
         config.peak_detect_enabled,
@@ -1134,6 +1193,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.result_flag_path,
         config.focus_guide_angle_degrees,
         config.focus_guide_line_width,
+        config.focus_y_offset_mm,
     )
     return config
 
@@ -1519,6 +1579,7 @@ class OfflineSessionManager:
             "before_seq": int(session.before_seq) if session.before_seq is not None else None,
             "before_ts": round(float(session.before_ts), 6) if session.before_ts is not None else None,
             "focus_anchor": [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None,
+            "focus_depth_mm": round(float(session.focus_depth_mm), 6) if session.focus_depth_mm is not None else None,
             "roi2_rect": [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None,
             "roi3_rect": [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None,
             "before_mean": round(float(session.before_mean), 6) if session.before_mean is not None else None,
@@ -1830,6 +1891,8 @@ class OfflineSessionManager:
     def _initialize_focus_and_rois(self, session: OfflineSession, before_frame: np.ndarray) -> None:
         raw_provider = self._provider_fetcher()
         focus_point = raw_provider.get("focus_point") if isinstance(raw_provider, dict) else None
+        provider_depth = raw_provider.get("depth") if isinstance(raw_provider, dict) else None
+        focus_depth_mm = parse_focus_depth_mm(provider_depth)
         anchor = parse_focus_point(focus_point) if focus_point is not None else None
         roi2_rect = None
         roi3_rect = None
@@ -1845,15 +1908,20 @@ class OfflineSessionManager:
                 used_cache = True
         if anchor is not None and roi2_rect is not None and roi3_rect is not None:
             session.focus_anchor = anchor
+            session.focus_depth_mm = focus_depth_mm
             session.roi2_rect = roi2_rect
             session.roi3_rect = roi3_rect
             self._set_cached_roi_state(anchor, roi2_rect, roi3_rect)
         session.meta["provider_focus_point"] = focus_point
+        session.meta["provider_depth"] = provider_depth
+        session.meta["focus_depth_mm"] = focus_depth_mm
         self._offline_diag(
             "focus_roi_initialized",
             point_id=session.point_id,
             capture_source="image_matrix",
             provider_focus_point=focus_point,
+            provider_depth=provider_depth,
+            focus_depth_mm=focus_depth_mm,
             parsed_anchor=[int(anchor[0]), int(anchor[1])] if anchor is not None else None,
             used_cache=bool(used_cache),
             roi2_rect=[int(v) for v in roi2_rect] if roi2_rect is not None else None,
@@ -2191,6 +2259,16 @@ class OfflineSessionManager:
         self._flush_buffered_frames(session)
         meta = dict(session.meta)
         meta["focus_anchor"] = [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None
+        meta["focus_depth_mm"] = round(float(session.focus_depth_mm), 6) if session.focus_depth_mm is not None else None
+        meta["focus_y_offset_mm"] = round(float(self._config.focus_y_offset_mm), 6)
+        focus_overlay_anchor = None
+        if session.before is not None:
+            focus_overlay_anchor = resolve_focus_overlay_anchor(
+                (int(session.before.shape[1]), int(session.before.shape[0])),
+                session,
+                self._config,
+            )
+        meta["focus_overlay_anchor"] = [int(focus_overlay_anchor[0]), int(focus_overlay_anchor[1])] if focus_overlay_anchor is not None else None
         meta["roi2_rect"] = [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None
         meta["roi3_rect"] = [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None
         meta.update(build_roi4_diagnostics(session))
