@@ -1173,6 +1173,52 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag roi4_after_selector_failed:", log_text)
         self.assertIn('"error": "ROI4 rect outside image bounds', log_text)
 
+    def test_offline_invalid_roi4_rect_returns_error_without_stop_timeout(self):
+        logger, stream = self.make_stream_logger("test_offline_invalid_roi4_rect_returns_error_without_stop_timeout")
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi4_rect=(0, 30, 50, 60),
+                    roi4_after_selector={
+                        "enabled": True,
+                        "block_size": 24,
+                        "gray_diff_threshold": 15.0,
+                        "candidate_area_ratio_threshold": 3.0,
+                        "descent_low_frame_number": 2,
+                    },
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=1.0,
+                ),
+                logger=logger,
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertFalse(stop["success"])
+            self.assertEqual(stop["info"], "error_in_detect")
+            self.assertIn("ROI4 rect outside image bounds", stop["error"])
+            self.assertIn("before_path", stop)
+            self.assertIn("after_path", stop)
+            log_text = stream.getvalue()
+            self.assertIn("OFFLINE diag roi4_validate_end:", log_text)
+            self.assertIn('"success": false', log_text)
+            self.assertIn("OFFLINE diag finished_event_set:", log_text)
+            self.assertIn('"response_info": "error_in_detect"', log_text)
+
     def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
         manager = api_server.OfflineSessionManager(
             provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},

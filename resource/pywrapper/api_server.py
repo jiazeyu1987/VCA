@@ -2789,6 +2789,7 @@ class OfflineSessionManager:
                 "roi4_validate",
                 configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
             )
+            roi4_validate_ok = True
             try:
                 if self._config.roi4_rect is not None and session.before is not None:
                     session.roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, session.before)
@@ -2802,20 +2803,29 @@ class OfflineSessionManager:
                 )
             except Exception as exc:
                 self._finalization_stage_end(session, "roi4_validate", roi4_validate_start, success=False, error=str(exc))
-                raise
+                roi4_validate_ok = False
+                pending_error_response = {
+                    "success": False,
+                    "info": "error_in_detect",
+                    "point_id": session.point_id,
+                    "error": str(exc),
+                }
             roi4_selector_start = self._finalization_stage_begin(
                 session,
                 "roi4_selector",
                 after_method=session.after_method,
                 selector_enabled=bool((self._config.roi4_after_selector or {}).get("enabled", False)),
+                skipped_due_to_roi4_validate_error=bool(not roi4_validate_ok),
             )
             try:
-                self._apply_roi4_after_selector_if_needed(session)
+                if roi4_validate_ok:
+                    self._apply_roi4_after_selector_if_needed(session)
                 self._finalization_stage_end(
                     session,
                     "roi4_selector",
                     roi4_selector_start,
                     success=True,
+                    skipped=bool(not roi4_validate_ok),
                     after_method=session.after_method,
                     applied=bool(session.roi4_after_selector_applied),
                     selector_reason=session.roi4_selector_reason,
