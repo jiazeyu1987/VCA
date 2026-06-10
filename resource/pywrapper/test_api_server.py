@@ -445,6 +445,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(config.roi2_extension_params, {"left": 11, "right": 12, "top": 13, "bottom": 14})
         self.assertEqual(config.roi3_extension_params, {"left": 21, "right": 22, "top": 23, "bottom": 24})
         self.assertEqual(config.roi4_rect, (16, 306, 577, 495))
+        self.assertIsNone(config.roi4_bottom_region_ratio)
         self.assertTrue(config.roi4_after_selector["enabled"])
         self.assertEqual(config.roi4_after_selector["block_size"], 24)
         self.assertEqual(config.roi4_after_selector["gray_diff_threshold"], 15.0)
@@ -477,20 +478,85 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertEqual(config.focus_y_offset_mm, 1.0)
 
-    def test_parse_offline_config_requires_roi4_rect_when_selector_enabled(self):
-        with self.assertRaisesRegex(ValueError, "settings.peak_detect.roi4_rect is required"):
-            api_server.parse_offline_config(
-                {
-                    "peak_detect": {
-                        "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
-                        "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
-                        "difference_threshold": 1.5,
-                        "roi4_after_selector": {"enabled": True},
-                    },
-                    "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
+    def test_parse_offline_config_defaults_roi4_to_bottom_30_percent_when_selector_enabled(self):
+        config = api_server.parse_offline_config(
+            {
+                "peak_detect": {
+                    "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                    "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "difference_threshold": 1.5,
+                    "roi4_after_selector": {"enabled": True},
                 },
-                self.make_null_logger("test_parse_offline_config_requires_roi4_rect_when_selector_enabled"),
+                "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
+            },
+            self.make_null_logger("test_parse_offline_config_defaults_roi4_to_bottom_30_percent_when_selector_enabled"),
+        )
+
+        self.assertIsNone(config.roi4_rect)
+        self.assertEqual(config.roi4_bottom_region_ratio, 0.3)
+
+    def test_parse_offline_config_reads_configured_roi4_bottom_percent(self):
+        config = api_server.parse_offline_config(
+            {
+                "peak_detect": {
+                    "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                    "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "difference_threshold": 1.5,
+                    "roi4_bottom_region": {"height_ratio": 0.4},
+                    "roi4_after_selector": {"enabled": True},
+                },
+                "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
+            },
+            self.make_null_logger("test_parse_offline_config_reads_configured_roi4_bottom_percent"),
+        )
+
+        self.assertIsNone(config.roi4_rect)
+        self.assertEqual(config.roi4_bottom_region_ratio, 0.4)
+
+    def test_resolve_roi4_rect_uses_bottom_percent_of_current_image(self):
+        image = np.zeros((512, 542, 3), dtype=np.uint8)
+        config = api_server.OfflineConfig(roi4_bottom_region_ratio=0.3)
+
+        rect = api_server.resolve_roi4_rect_for_image(config, image)
+
+        self.assertEqual(rect, (0, 358, 542, 512))
+
+    def test_offline_uses_roi4_bottom_percent_region(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi4_bottom_region_ratio=0.25,
+                    roi4_after_selector={
+                        "enabled": True,
+                        "block_size": 8,
+                        "gray_diff_threshold": 15.0,
+                        "candidate_area_ratio_threshold": 3.0,
+                        "descent_low_frame_number": 2,
+                    },
+                    difference_threshold=5.0,
+                    image_output_dir=tmp,
+                    db_root_dir=None,
+                    result_flag_path=str(Path(tmp) / "result.txt"),
+                    stop_wait_timeout_seconds=1.0,
+                ),
+                logger=self.make_null_logger("test_offline_uses_roi4_bottom_percent_region"),
             )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertEqual(stop["info"], "offline_stop_completed")
+            self.assertEqual(stop["roi4_rect"], [0, 30, 40, 40])
 
     def test_roi4_candidate_area_ratio_uses_exact_edge_block_area(self):
         before = np.zeros((5, 5, 3), dtype=np.uint8)

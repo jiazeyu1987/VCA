@@ -60,6 +60,7 @@ GUIDE_LINE_COLOR = (0, 255, 0)
 GUIDE_LINE_WIDTH = 3
 GUIDE_LINE_ANGLE_DEGREES = 100.0
 FOCUS_Y_OFFSET_MM = 1.0
+ROI4_BOTTOM_REGION_RATIO = 0.3
 ROI4_FALLBACK_AFTER_METHODS = {
     "roi1_boundary_after2_fallback_last",
     "stop_fallback",
@@ -121,6 +122,7 @@ class OfflineConfig:
     offline_peak_threshold: Optional[float] = None
     offline_peak_after_delay_frames: int = 2
     offline_peak_end_diff_threshold: float = 7.0
+    roi4_bottom_region_ratio: Optional[float] = None
     debug_save_enabled: bool = False
     debug_save_dir: str = "D:/software_data/tmp"
     offline_tmp_max_buffer_frames: int = 2500
@@ -557,6 +559,34 @@ def validate_roi4_rect_for_image(
     if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
         raise ValueError(f"ROI4 rect outside image bounds rect={rect} size={(width, height)}")
     return x1, y1, x2, y2
+
+
+def validate_roi4_bottom_region_ratio(value) -> float:
+    try:
+        ratio = float(value)
+    except Exception as exc:
+        raise ValueError(f"ROI4 bottom region height_ratio must be a number, got {value}") from exc
+    if ratio <= 0.0 or ratio > 1.0:
+        raise ValueError(f"ROI4 bottom region height_ratio must be > 0 and <= 1, got {value}")
+    return ratio
+
+
+def compute_roi4_bottom_region_rect(image: np.ndarray, height_ratio: float) -> Tuple[int, int, int, int]:
+    arr = np.asarray(image)
+    height, width = arr.shape[:2]
+    if width <= 0 or height <= 0:
+        raise ValueError(f"cannot resolve ROI4 bottom region for empty image size={(width, height)}")
+    ratio = validate_roi4_bottom_region_ratio(height_ratio)
+    roi_height = max(1, min(int(height), int(round(float(height) * ratio))))
+    return 0, int(height - roi_height), int(width), int(height)
+
+
+def resolve_roi4_rect_for_image(config: "OfflineConfig", image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    if config.roi4_rect is not None:
+        return validate_roi4_rect_for_image(config.roi4_rect, image)
+    if config.roi4_bottom_region_ratio is None:
+        return None
+    return compute_roi4_bottom_region_rect(image, config.roi4_bottom_region_ratio)
 
 
 def compute_roi4_mask_metrics(
@@ -1039,11 +1069,9 @@ def load_offline_config(logger: logging.Logger) -> OfflineConfig:
     return parse_offline_config(settings, logger)
 
 
-def parse_roi4_rect(peak: dict, selector_enabled: bool) -> Optional[Tuple[int, int, int, int]]:
+def parse_roi4_rect(peak: dict) -> Optional[Tuple[int, int, int, int]]:
     raw = peak.get("roi4_rect")
     if raw is None:
-        if selector_enabled:
-            raise ValueError("settings.peak_detect.roi4_rect is required when roi4_after_selector.enabled=true")
         return None
     if not isinstance(raw, dict):
         raise ValueError("settings.peak_detect.roi4_rect must be an object")
@@ -1059,6 +1087,18 @@ def parse_roi4_rect(peak: dict, selector_enabled: bool) -> Optional[Tuple[int, i
     if x < 0 or y < 0:
         raise ValueError("settings.peak_detect.roi4_rect x and y must be >= 0")
     return x, y, x + width, y + height
+
+
+def parse_roi4_bottom_region_ratio(peak: dict, selector_enabled: bool, has_fixed_roi4_rect: bool) -> Optional[float]:
+    raw = peak.get("roi4_bottom_region")
+    if raw is None:
+        return ROI4_BOTTOM_REGION_RATIO if selector_enabled and not has_fixed_roi4_rect else None
+    if has_fixed_roi4_rect:
+        raise ValueError("settings.peak_detect cannot define both roi4_rect and roi4_bottom_region")
+    if not isinstance(raw, dict):
+        raise ValueError("settings.peak_detect.roi4_bottom_region must be an object")
+    ratio = raw.get("height_ratio", ROI4_BOTTOM_REGION_RATIO)
+    return validate_roi4_bottom_region_ratio(ratio)
 
 
 def parse_roi4_after_selector(peak: dict) -> dict:
@@ -1109,7 +1149,12 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     if not isinstance(roi3_ext, dict):
         raise ValueError("settings.peak_detect.roi3_extension_params is required for OFFLINE")
     roi4_after_selector = parse_roi4_after_selector(peak)
-    roi4_rect = parse_roi4_rect(peak, bool(roi4_after_selector.get("enabled", False)))
+    roi4_rect = parse_roi4_rect(peak)
+    roi4_bottom_region_ratio = parse_roi4_bottom_region_ratio(
+        peak,
+        bool(roi4_after_selector.get("enabled", False)),
+        roi4_rect is not None,
+    )
     threshold = peak.get("difference_threshold")
     if threshold is None:
         raise ValueError("settings.peak_detect.difference_threshold is required for OFFLINE")
@@ -1154,6 +1199,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         roi2_extension_params=dict(roi2_ext),
         roi3_extension_params=dict(roi3_ext),
         roi4_rect=roi4_rect,
+        roi4_bottom_region_ratio=roi4_bottom_region_ratio,
         difference_threshold=float(threshold),
         roi4_after_selector=roi4_after_selector,
         roi3_g1_g2_override=dict(g1g2_override) if isinstance(g1g2_override, dict) else {"enabled": True, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": True},
@@ -1175,7 +1221,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     )
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
-        "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
+        "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s roi4_bottom_region_ratio=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
         "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
         "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s",
         config.screenshot_test_enabled,
@@ -1186,6 +1232,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.roi2_extension_params,
         config.roi3_extension_params,
         config.roi4_rect,
+        config.roi4_bottom_region_ratio,
         config.difference_threshold,
         config.roi4_after_selector,
         config.debug_save_enabled,
@@ -2044,8 +2091,6 @@ class OfflineSessionManager:
             )
             return
         try:
-            if self._config.roi4_rect is None:
-                raise ValueError("ROI4 after selector requires roi4_rect")
             if session.initial_before_record is None:
                 raise ValueError("ROI4 after selector requires initial before frame")
             if not session.frame_buffer:
@@ -2071,7 +2116,8 @@ class OfflineSessionManager:
                 capture_source="image_matrix",
                 original_after_method=session.after_method,
                 original_after_seq=int(session.after_seq) if session.after_seq is not None else None,
-                configured_roi4_rect=[int(v) for v in self._config.roi4_rect],
+                configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
+                roi4_bottom_region_ratio=round(float(self._config.roi4_bottom_region_ratio), 6) if self._config.roi4_bottom_region_ratio is not None else None,
                 baseline_frame_index=int(baseline.frame_index),
                 baseline_seq=int(baseline.seq),
                 buffered_frame_count=len(session.frame_buffer),
@@ -2080,7 +2126,9 @@ class OfflineSessionManager:
                 candidate_area_ratio_threshold=round(float(area_threshold), 6),
                 descent_low_frame_number=int(descent_low_frame_number),
             )
-            roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, baseline.frame)
+            roi4_rect = resolve_roi4_rect_for_image(self._config, baseline.frame)
+            if roi4_rect is None:
+                raise ValueError("ROI4 after selector requires roi4_rect or roi4_bottom_region")
             session.roi4_rect = roi4_rect
             session.roi4_candidate_area_ratio_threshold = area_threshold
             session.roi4_after_selector_applied = False
@@ -2226,6 +2274,7 @@ class OfflineSessionManager:
                 capture_source="image_matrix",
                 after_method=session.after_method,
                 configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
+                roi4_bottom_region_ratio=round(float(self._config.roi4_bottom_region_ratio), 6) if self._config.roi4_bottom_region_ratio is not None else None,
                 error=str(exc),
             )
             raise
@@ -2788,17 +2837,18 @@ class OfflineSessionManager:
                 session,
                 "roi4_validate",
                 configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
+                roi4_bottom_region_ratio=round(float(self._config.roi4_bottom_region_ratio), 6) if self._config.roi4_bottom_region_ratio is not None else None,
             )
             roi4_validate_ok = True
             try:
-                if self._config.roi4_rect is not None and session.before is not None:
-                    session.roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, session.before)
+                if session.before is not None:
+                    session.roi4_rect = resolve_roi4_rect_for_image(self._config, session.before)
                 self._finalization_stage_end(
                     session,
                     "roi4_validate",
                     roi4_validate_start,
                     success=True,
-                    skipped=bool(self._config.roi4_rect is None or session.before is None),
+                    skipped=bool(session.roi4_rect is None),
                     roi4_rect=[int(v) for v in session.roi4_rect] if session.roi4_rect is not None else None,
                 )
             except Exception as exc:

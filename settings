@@ -39,7 +39,7 @@
     "difference_threshold": 0.5,
     "roi2_extension_params": { "left": 40, "right": 40, "top": 50, "bottom": 30 },
     "roi3_extension_params": { "left": 30, "right": 30, "top": 50, "bottom": 100 },
-    "roi4_rect": { "x": 16, "y": 306, "width": 561, "height": 189 },
+    "roi4_bottom_region": { "height_ratio": 0.3 },
     "roi4_after_selector": { "enabled": true, "block_size": 24, "gray_diff_threshold": 15.0, "candidate_area_ratio_threshold": 3.0, "descent_low_frame_number": 2 },
     "_comment_roi3_override": "When ROI2 result is red, ROI3 metrics can override to green. Frame selection: use_peak_max=true will pick the buffered frame (offline_tmp_frames) with max ROI3 G1; otherwise uses the AFTER frame. ROI4 can be used as an additional after selector when the main after image is still a fallback frame.",
     "roi3_g1_g2_override": { "enabled": true, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": true },
