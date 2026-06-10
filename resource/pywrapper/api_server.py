@@ -198,6 +198,9 @@ class OfflineSession:
     frame_buffer: list[OfflineFrameRecord] = field(default_factory=list)
     debug_dir: Optional[str] = None
     meta: dict = field(default_factory=dict)
+    finalization_stage: Optional[str] = None
+    finalization_stage_started_ns: Optional[int] = None
+    finalization_started_ns: Optional[int] = None
 
 
 class MSG(ctypes.Structure):
@@ -1592,6 +1595,78 @@ class OfflineSessionManager:
         payload["capture_source"] = self._capture_source
         getattr(self._logger, level, self._logger.info)("OFFLINE diag %s: %s", event, safe_json_text(payload))
 
+    def _elapsed_ms_since(self, start_ns: Optional[int], now_ns: Optional[int] = None) -> Optional[float]:
+        if start_ns is None:
+            return None
+        if now_ns is None:
+            now_ns = time.perf_counter_ns()
+        return round(float(now_ns - int(start_ns)) / 1_000_000.0, 3)
+
+    def _finalization_progress_fields(self, session: OfflineSession, now_ns: Optional[int] = None) -> dict:
+        if now_ns is None:
+            now_ns = time.perf_counter_ns()
+        fields = {}
+        if session.finalization_stage is not None:
+            fields["last_stage"] = session.finalization_stage
+        last_stage_elapsed_ms = self._elapsed_ms_since(session.finalization_stage_started_ns, now_ns)
+        if last_stage_elapsed_ms is not None:
+            fields["last_stage_elapsed_ms"] = last_stage_elapsed_ms
+        finalization_elapsed_ms = self._elapsed_ms_since(session.finalization_started_ns, now_ns)
+        if finalization_elapsed_ms is not None:
+            fields["finalization_elapsed_ms"] = finalization_elapsed_ms
+        return fields
+
+    def _finalization_common_fields(self, session: OfflineSession, now_ns: Optional[int] = None) -> dict:
+        fields = self._finalization_progress_fields(session, now_ns)
+        fields.update(
+            {
+                "before_set": bool(session.before is not None),
+                "after_set": bool(session.after is not None),
+                "frame_buffer_count": len(session.frame_buffer),
+                "debug_save_enabled": bool(self._config.debug_save_enabled),
+            }
+        )
+        return fields
+
+    def _finalization_stage_begin(self, session: OfflineSession, stage: str, **fields) -> int:
+        now_ns = time.perf_counter_ns()
+        if session.finalization_started_ns is None:
+            session.finalization_started_ns = now_ns
+        session.finalization_stage = stage
+        session.finalization_stage_started_ns = now_ns
+        payload = {"stage": stage}
+        payload.update(self._finalization_common_fields(session, now_ns))
+        payload.update(fields)
+        self._offline_diag(f"{stage}_begin", point_id=session.point_id, **payload)
+        return now_ns
+
+    def _finalization_stage_end(self, session: OfflineSession, stage: str, start_ns: int, **fields) -> None:
+        now_ns = time.perf_counter_ns()
+        payload = {
+            "stage": stage,
+            "elapsed_ms": self._elapsed_ms_since(start_ns, now_ns),
+        }
+        payload.update(self._finalization_common_fields(session, now_ns))
+        payload.update(fields)
+        self._offline_diag(f"{stage}_end", point_id=session.point_id, **payload)
+
+    def _mark_finished_event_set(self, session: OfflineSession, reason: str) -> None:
+        now_ns = time.perf_counter_ns()
+        if session.finalization_started_ns is None:
+            session.finalization_started_ns = now_ns
+        session.finalization_stage = "finished_event_set"
+        session.finalization_stage_started_ns = now_ns
+        response = session.response if isinstance(session.response, dict) else {}
+        self._offline_diag(
+            "finished_event_set",
+            point_id=session.point_id,
+            reason=reason,
+            response_success=response.get("success"),
+            response_info=response.get("info"),
+            **self._finalization_common_fields(session, now_ns),
+        )
+        session.finished_event.set()
+
     def _parse_arg(self, arg_json_text: Optional[str]) -> dict:
         if not arg_json_text:
             raise ValueError("OFFLINE requires JSON args")
@@ -1731,6 +1806,7 @@ class OfflineSessionManager:
             capture_source="image_matrix",
             wait_timeout_s=round(float(timeout_s), 6),
             thread_alive=bool(session.thread is not None and session.thread.is_alive()),
+            **self._finalization_progress_fields(session),
         )
         finished_ok = bool(session.finished_event.wait(timeout=timeout_s))
         self._offline_diag(
@@ -1741,6 +1817,7 @@ class OfflineSessionManager:
             finished_ok=bool(finished_ok),
             capture_done=bool(session.capture_done_event.is_set()),
             thread_alive=bool(session.thread is not None and session.thread.is_alive()),
+            **self._finalization_progress_fields(session),
         )
         self._active_session = None
         self._orphans.append(session)
@@ -2299,108 +2376,202 @@ class OfflineSessionManager:
         self._debug_saver.write_meta(session.debug_dir, meta)
 
     def _save_final_outputs(self, session: OfflineSession) -> dict:
-        if not self._config.image_output_dir:
-            return {}
-        img_dir = Path(self._config.image_output_dir)
-        img_dir.mkdir(parents=True, exist_ok=True)
-        before_path = img_dir / f"{session.before_name or 'before'}_before.png"
-        after_path = img_dir / f"{session.after_name or 'after'}_after.png"
-        if not session.is_save:
-            before_path = img_dir / "energy_before.png"
-            after_path = img_dir / "energy_after.png"
-        if session.before is not None:
-            write_png(before_path, render_frame_with_focus_guides(session.before, session, self._config))
-        if session.after is not None:
-            write_png(after_path, render_frame_with_focus_guides(session.after, session, self._config))
+        stage_start = self._finalization_stage_begin(
+            session,
+            "save_final_outputs",
+            image_output_dir=self._config.image_output_dir,
+        )
         result = {}
+        img_dir = Path(self._config.image_output_dir) if self._config.image_output_dir else None
         treatment_ok = session.final_roi2_color == "green"
         result_flag_value = "1" if treatment_ok else "0"
-        if session.before is not None:
-            result["before_path"] = str(before_path)
-        if session.after is not None:
-            result["after_path"] = str(after_path)
-        if session.before is not None and session.after is not None:
-            diff_path = Path(str(after_path).replace("_after", "_diff"))
-            diff_with_overlay = render_diff_with_overlay(session, self._config)
-            if diff_with_overlay is not None:
-                write_png(diff_path, diff_with_overlay)
-            result["diff_path"] = str(diff_path)
-            self._offline_diag(
-                "main_program_state_sync_begin",
-                point_id=session.point_id,
-                capture_source="image_matrix",
-                roi2_color=session.final_roi2_color,
-                treatment_ok=bool(treatment_ok),
-                result_flag_path=self._config.result_flag_path,
-                result_flag_value=result_flag_value,
-                is_save=bool(session.is_save),
-                db_root_dir=self._config.db_root_dir,
-                before_path=str(before_path),
-                after_path=str(after_path),
-                diff_path=str(diff_path),
-            )
-            try:
-                write_result_flag(self._config.result_flag_path, treatment_ok)
+        try:
+            if img_dir is None:
+                return result
+            img_dir.mkdir(parents=True, exist_ok=True)
+            before_path = img_dir / f"{session.before_name or 'before'}_before.png"
+            after_path = img_dir / f"{session.after_name or 'after'}_after.png"
+            if not session.is_save:
+                before_path = img_dir / "energy_before.png"
+                after_path = img_dir / "energy_after.png"
+            if session.before is not None:
+                write_before_start = self._finalization_stage_begin(session, "write_before", path=str(before_path))
+                try:
+                    write_png(before_path, render_frame_with_focus_guides(session.before, session, self._config))
+                    self._finalization_stage_end(session, "write_before", write_before_start, path=str(before_path), success=True)
+                except Exception as exc:
+                    self._finalization_stage_end(session, "write_before", write_before_start, path=str(before_path), success=False, error=str(exc))
+                    raise
+            if session.after is not None:
+                write_after_start = self._finalization_stage_begin(session, "write_after", path=str(after_path))
+                try:
+                    write_png(after_path, render_frame_with_focus_guides(session.after, session, self._config))
+                    self._finalization_stage_end(session, "write_after", write_after_start, path=str(after_path), success=True)
+                except Exception as exc:
+                    self._finalization_stage_end(session, "write_after", write_after_start, path=str(after_path), success=False, error=str(exc))
+                    raise
+            if session.before is not None:
+                result["before_path"] = str(before_path)
+            if session.after is not None:
+                result["after_path"] = str(after_path)
+            if session.before is not None and session.after is not None:
+                diff_path = Path(str(after_path).replace("_after", "_diff"))
+                render_diff_start = self._finalization_stage_begin(session, "render_diff", path=str(diff_path))
+                try:
+                    diff_with_overlay = render_diff_with_overlay(session, self._config)
+                    self._finalization_stage_end(
+                        session,
+                        "render_diff",
+                        render_diff_start,
+                        path=str(diff_path),
+                        rendered=bool(diff_with_overlay is not None),
+                        success=True,
+                    )
+                except Exception as exc:
+                    self._finalization_stage_end(session, "render_diff", render_diff_start, path=str(diff_path), success=False, error=str(exc))
+                    raise
+                if diff_with_overlay is not None:
+                    write_diff_start = self._finalization_stage_begin(session, "write_diff", path=str(diff_path))
+                    try:
+                        write_png(diff_path, diff_with_overlay)
+                        self._finalization_stage_end(session, "write_diff", write_diff_start, path=str(diff_path), success=True)
+                    except Exception as exc:
+                        self._finalization_stage_end(session, "write_diff", write_diff_start, path=str(diff_path), success=False, error=str(exc))
+                        raise
+                result["diff_path"] = str(diff_path)
                 self._offline_diag(
-                    "result_flag_written",
+                    "main_program_state_sync_begin",
                     point_id=session.point_id,
                     capture_source="image_matrix",
                     roi2_color=session.final_roi2_color,
                     treatment_ok=bool(treatment_ok),
                     result_flag_path=self._config.result_flag_path,
                     result_flag_value=result_flag_value,
+                    is_save=bool(session.is_save),
+                    db_root_dir=self._config.db_root_dir,
+                    before_path=str(before_path),
+                    after_path=str(after_path),
+                    diff_path=str(diff_path),
+                )
+                result_flag_start = self._finalization_stage_begin(
+                    session,
+                    "result_flag_write",
+                    path=self._config.result_flag_path,
                     value=result_flag_value,
                 )
-            except Exception:
-                self._logger.exception("OFFLINE result flag write failed: point_id=%s", session.point_id)
-            if session.is_save:
                 try:
-                    update_segment_images_info(
-                        self._config.db_root_dir,
-                        session.point_id,
-                        str(before_path),
-                        str(after_path),
-                        treatment_ok,
+                    write_result_flag(self._config.result_flag_path, treatment_ok)
+                    self._finalization_stage_end(
+                        session,
+                        "result_flag_write",
+                        result_flag_start,
+                        path=self._config.result_flag_path,
+                        value=result_flag_value,
+                        success=True,
                     )
                     self._offline_diag(
-                        "db_update_completed",
+                        "result_flag_written",
                         point_id=session.point_id,
                         capture_source="image_matrix",
                         roi2_color=session.final_roi2_color,
                         treatment_ok=bool(treatment_ok),
-                        before_path=str(before_path),
-                        after_path=str(after_path),
-                        db_root_dir=self._config.db_root_dir,
+                        result_flag_path=self._config.result_flag_path,
+                        result_flag_value=result_flag_value,
+                        value=result_flag_value,
                     )
                 except Exception as exc:
-                    self._offline_diag(
-                        "db_update_failed",
-                        level="error",
-                        point_id=session.point_id,
-                        capture_source="image_matrix",
-                        roi2_color=session.final_roi2_color,
-                        treatment_ok=bool(treatment_ok),
-                        before_path=str(before_path),
-                        after_path=str(after_path),
-                        db_root_dir=self._config.db_root_dir,
+                    self._finalization_stage_end(
+                        session,
+                        "result_flag_write",
+                        result_flag_start,
+                        path=self._config.result_flag_path,
+                        value=result_flag_value,
+                        success=False,
                         error=str(exc),
                     )
-                    result["db_update_error"] = str(exc)
-        self._offline_diag(
-            "final_outputs_saved",
-            point_id=session.point_id,
-            capture_source="image_matrix",
-            is_save=bool(session.is_save),
-            roi2_color=session.final_roi2_color,
-            treatment_ok=bool(treatment_ok),
-            result_flag_path=self._config.result_flag_path,
-            result_flag_value=result_flag_value,
-            output_dir=str(img_dir),
-            before_path=result.get("before_path"),
-            after_path=result.get("after_path"),
-            diff_path=result.get("diff_path"),
-        )
-        return result
+                    self._logger.exception("OFFLINE result flag write failed: point_id=%s", session.point_id)
+                if session.is_save:
+                    db_update_start = self._finalization_stage_begin(
+                        session,
+                        "db_update",
+                        db_root_dir=self._config.db_root_dir,
+                        before_path=str(before_path),
+                        after_path=str(after_path),
+                    )
+                    try:
+                        update_segment_images_info(
+                            self._config.db_root_dir,
+                            session.point_id,
+                            str(before_path),
+                            str(after_path),
+                            treatment_ok,
+                        )
+                        self._finalization_stage_end(
+                            session,
+                            "db_update",
+                            db_update_start,
+                            db_root_dir=self._config.db_root_dir,
+                            before_path=str(before_path),
+                            after_path=str(after_path),
+                            success=True,
+                        )
+                        self._offline_diag(
+                            "db_update_completed",
+                            point_id=session.point_id,
+                            capture_source="image_matrix",
+                            roi2_color=session.final_roi2_color,
+                            treatment_ok=bool(treatment_ok),
+                            before_path=str(before_path),
+                            after_path=str(after_path),
+                            db_root_dir=self._config.db_root_dir,
+                        )
+                    except Exception as exc:
+                        self._finalization_stage_end(
+                            session,
+                            "db_update",
+                            db_update_start,
+                            db_root_dir=self._config.db_root_dir,
+                            before_path=str(before_path),
+                            after_path=str(after_path),
+                            success=False,
+                            error=str(exc),
+                        )
+                        self._offline_diag(
+                            "db_update_failed",
+                            level="error",
+                            point_id=session.point_id,
+                            capture_source="image_matrix",
+                            roi2_color=session.final_roi2_color,
+                            treatment_ok=bool(treatment_ok),
+                            before_path=str(before_path),
+                            after_path=str(after_path),
+                            db_root_dir=self._config.db_root_dir,
+                            error=str(exc),
+                        )
+                        result["db_update_error"] = str(exc)
+            self._offline_diag(
+                "final_outputs_saved",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                is_save=bool(session.is_save),
+                roi2_color=session.final_roi2_color,
+                treatment_ok=bool(treatment_ok),
+                result_flag_path=self._config.result_flag_path,
+                result_flag_value=result_flag_value,
+                output_dir=str(img_dir),
+                before_path=result.get("before_path"),
+                after_path=result.get("after_path"),
+                diff_path=result.get("diff_path"),
+            )
+            return result
+        finally:
+            self._finalization_stage_end(
+                session,
+                "save_final_outputs",
+                stage_start,
+                image_output_dir=self._config.image_output_dir,
+                result_keys=sorted([str(key) for key in result.keys()]),
+            )
 
     def _log_final_response_ready(self, session: OfflineSession) -> None:
         response = session.response if isinstance(session.response, dict) else {}
@@ -2612,11 +2783,45 @@ class OfflineSessionManager:
                 buffered_frame_count=len(session.frame_buffer),
             )
 
-            if self._config.roi4_rect is not None and session.before is not None:
-                session.roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, session.before)
+            self._finalization_stage_begin(session, "postprocess", timed_out=bool(timed_out))
+            roi4_validate_start = self._finalization_stage_begin(
+                session,
+                "roi4_validate",
+                configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
+            )
+            try:
+                if self._config.roi4_rect is not None and session.before is not None:
+                    session.roi4_rect = validate_roi4_rect_for_image(self._config.roi4_rect, session.before)
+                self._finalization_stage_end(
+                    session,
+                    "roi4_validate",
+                    roi4_validate_start,
+                    success=True,
+                    skipped=bool(self._config.roi4_rect is None or session.before is None),
+                    roi4_rect=[int(v) for v in session.roi4_rect] if session.roi4_rect is not None else None,
+                )
+            except Exception as exc:
+                self._finalization_stage_end(session, "roi4_validate", roi4_validate_start, success=False, error=str(exc))
+                raise
+            roi4_selector_start = self._finalization_stage_begin(
+                session,
+                "roi4_selector",
+                after_method=session.after_method,
+                selector_enabled=bool((self._config.roi4_after_selector or {}).get("enabled", False)),
+            )
             try:
                 self._apply_roi4_after_selector_if_needed(session)
+                self._finalization_stage_end(
+                    session,
+                    "roi4_selector",
+                    roi4_selector_start,
+                    success=True,
+                    after_method=session.after_method,
+                    applied=bool(session.roi4_after_selector_applied),
+                    selector_reason=session.roi4_selector_reason,
+                )
             except Exception as exc:
+                self._finalization_stage_end(session, "roi4_selector", roi4_selector_start, success=False, error=str(exc))
                 pending_error_response = {
                     "success": False,
                     "info": "error_in_detect",
@@ -2624,19 +2829,49 @@ class OfflineSessionManager:
                     "error": str(exc),
                 }
 
-            session.final_roi2_color = "red"
-            if session.roi2_rect is None and session.before is not None:
-                self._initialize_focus_and_rois(session, session.before)
-                if session.roi2_rect is not None and session.before_mean is None:
-                    session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
-            if self._config.peak_detect_enabled and session.roi2_rect is not None and session.before is not None and session.after is not None:
-                if session.before_mean is None:
-                    session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
-                session.after_mean = roi_gray_mean(session.after, session.roi2_rect)
-                session.roi2_diff = float(session.after_mean) - float(session.before_mean)
-                session.final_roi2_color = "green" if session.roi2_diff >= float(self._config.difference_threshold) else "red"
-                if session.final_roi2_color == "red":
-                    self._apply_roi3_overrides(session)
+            roi2_metrics_start = self._finalization_stage_begin(
+                session,
+                "roi2_metrics",
+                peak_detect_enabled=bool(self._config.peak_detect_enabled),
+            )
+            try:
+                session.final_roi2_color = "red"
+                if session.roi2_rect is None and session.before is not None:
+                    self._initialize_focus_and_rois(session, session.before)
+                    if session.roi2_rect is not None and session.before_mean is None:
+                        session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
+                if self._config.peak_detect_enabled and session.roi2_rect is not None and session.before is not None and session.after is not None:
+                    if session.before_mean is None:
+                        session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
+                    session.after_mean = roi_gray_mean(session.after, session.roi2_rect)
+                    session.roi2_diff = float(session.after_mean) - float(session.before_mean)
+                    session.final_roi2_color = "green" if session.roi2_diff >= float(self._config.difference_threshold) else "red"
+                    if session.final_roi2_color == "red":
+                        roi3_override_start = self._finalization_stage_begin(session, "roi3_override")
+                        try:
+                            self._apply_roi3_overrides(session)
+                            self._finalization_stage_end(
+                                session,
+                                "roi3_override",
+                                roi3_override_start,
+                                success=True,
+                                roi3_override_applied=bool(session.roi3_override_applied),
+                                roi3_override_method=session.roi3_override_method,
+                            )
+                        except Exception as exc:
+                            self._finalization_stage_end(session, "roi3_override", roi3_override_start, success=False, error=str(exc))
+                            raise
+                self._finalization_stage_end(
+                    session,
+                    "roi2_metrics",
+                    roi2_metrics_start,
+                    success=True,
+                    roi2_color=session.final_roi2_color,
+                    roi2_diff=round(float(session.roi2_diff), 6) if session.roi2_diff is not None else None,
+                )
+            except Exception as exc:
+                self._finalization_stage_end(session, "roi2_metrics", roi2_metrics_start, success=False, error=str(exc))
+                raise
 
             self._offline_diag(
                 "stop_decision",
@@ -2676,12 +2911,34 @@ class OfflineSessionManager:
                 }
                 self._attach_treatment_result_fields(session)
                 self._log_final_response_ready(session)
-                session.finished_event.set()
+                self._mark_finished_event_set(session, "final_output_save_failed")
                 return
+            save_debug_start = self._finalization_stage_begin(
+                session,
+                "save_debug_outputs",
+                debug_dir=session.debug_dir,
+                debug_save_enabled=bool(self._config.debug_save_enabled),
+            )
             try:
                 self._save_debug_outputs(session)
+                self._finalization_stage_end(
+                    session,
+                    "save_debug_outputs",
+                    save_debug_start,
+                    success=True,
+                    debug_dir=session.debug_dir,
+                    debug_save_enabled=bool(self._config.debug_save_enabled),
+                )
             except Exception:
                 self._logger.exception("OFFLINE debug save failed on finish: point_id=%s", session.point_id)
+                self._finalization_stage_end(
+                    session,
+                    "save_debug_outputs",
+                    save_debug_start,
+                    success=False,
+                    debug_dir=session.debug_dir,
+                    debug_save_enabled=bool(self._config.debug_save_enabled),
+                )
                 session.response = {
                     "success": False,
                     "info": "debug_save_failed",
@@ -2689,7 +2946,7 @@ class OfflineSessionManager:
                 }
                 self._attach_treatment_result_fields(session)
                 self._log_final_response_ready(session)
-                session.finished_event.set()
+                self._mark_finished_event_set(session, "debug_save_failed")
                 return
 
             db_update_error = result_paths.pop("db_update_error", None)
@@ -2700,7 +2957,7 @@ class OfflineSessionManager:
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
                 self._log_final_response_ready(session)
-                session.finished_event.set()
+                self._mark_finished_event_set(session, "pending_error_response")
                 return
 
             if db_update_error is not None:
@@ -2716,7 +2973,7 @@ class OfflineSessionManager:
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
                 self._log_final_response_ready(session)
-                session.finished_event.set()
+                self._mark_finished_event_set(session, "db_update_failed")
                 return
 
             session.response = {
@@ -2748,7 +3005,7 @@ class OfflineSessionManager:
             if session.debug_dir is not None:
                 session.response["debug_dir"] = session.debug_dir
             self._log_final_response_ready(session)
-            session.finished_event.set()
+            self._mark_finished_event_set(session, "offline_stop_completed")
 
 
 def parse_request(text: str) -> ParsedRequest:

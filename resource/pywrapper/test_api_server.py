@@ -47,6 +47,17 @@ class ApiServerTests(unittest.TestCase):
         def is_set(self):
             return True
 
+    class TimeoutProbe:
+        def __init__(self):
+            self.calls = []
+
+        def wait(self, timeout=None):
+            self.calls.append(timeout)
+            return False
+
+        def is_set(self):
+            return False
+
     class FakeThread:
         def is_alive(self):
             return True
@@ -1228,6 +1239,36 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag switch_wait_completed:", log_text)
         self.assertIn('"capture_done_after_wait": true', log_text)
 
+    def test_offline_stop_timeout_logs_last_finalization_stage(self):
+        logger, stream = self.make_stream_logger("test_offline_stop_timeout_logs_last_finalization_stage")
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
+            frame_fetcher=self.SequenceFrameSource([]),
+            config=api_server.OfflineConfig(stop_wait_timeout_seconds=1.0),
+            logger=logger,
+        )
+        session = api_server.OfflineSession(
+            point_id=123,
+            duration_s=10.0,
+            is_save=True,
+            stop_event=threading.Event(),
+        )
+        session.finished_event = self.TimeoutProbe()
+        session.capture_done_event = threading.Event()
+        session.thread = self.FakeThread()
+        session.finalization_stage = "save_debug_outputs"
+        session.finalization_stage_started_ns = time.perf_counter_ns() - 150_000_000
+        session.finalization_started_ns = time.perf_counter_ns() - 300_000_000
+
+        result = manager._stop_locked(session)
+
+        self.assertEqual(result["info"], "offline_stop_timeout")
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag stop_wait_completed:", log_text)
+        self.assertIn('"last_stage": "save_debug_outputs"', log_text)
+        self.assertIn('"last_stage_elapsed_ms":', log_text)
+        self.assertIn('"finalization_elapsed_ms":', log_text)
+
     def test_offline_debug_save_flushes_buffered_frames_and_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
             frames = self.SequenceFrameSource(
@@ -1626,8 +1667,10 @@ class ApiServerTests(unittest.TestCase):
             manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
             log_text = stream.getvalue()
+            self.assertIn("OFFLINE diag save_debug_outputs_begin:", log_text)
             self.assertIn("OFFLINE diag buffer_flush_begin:", log_text)
             self.assertIn("OFFLINE diag buffer_flush_completed:", log_text)
+            self.assertIn("OFFLINE diag save_debug_outputs_end:", log_text)
             self.assertIn("OFFLINE diag result_flag_written:", log_text)
             self.assertIn("OFFLINE diag final_outputs_saved:", log_text)
             self.assertIn('"meta_jsonl":', log_text)
@@ -1664,9 +1707,19 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(stop["roi2_color"], "green")
             log_text = stream.getvalue()
             self.assertIn("OFFLINE diag main_program_state_sync_begin:", log_text)
+            self.assertIn("OFFLINE diag save_final_outputs_begin:", log_text)
+            self.assertIn("OFFLINE diag write_before_begin:", log_text)
+            self.assertIn("OFFLINE diag write_before_end:", log_text)
+            self.assertIn("OFFLINE diag write_after_begin:", log_text)
+            self.assertIn("OFFLINE diag render_diff_begin:", log_text)
+            self.assertIn("OFFLINE diag write_diff_end:", log_text)
+            self.assertIn("OFFLINE diag db_update_begin:", log_text)
             self.assertIn("OFFLINE diag result_flag_written:", log_text)
             self.assertIn("OFFLINE diag db_update_completed:", log_text)
+            self.assertIn("OFFLINE diag save_final_outputs_end:", log_text)
+            self.assertIn("OFFLINE diag finished_event_set:", log_text)
             self.assertIn("OFFLINE diag final_response_ready:", log_text)
+            self.assertIn('"elapsed_ms":', log_text)
             self.assertIn('"roi2_color": "green"', log_text)
             self.assertIn('"treatment_ok": true', log_text)
             self.assertIn('"result_flag_value": "1"', log_text)
