@@ -766,6 +766,31 @@ def resolve_focus_overlay_anchor(
         ) from exc
 
 
+def resolve_offset_focus_anchor(
+    image_size: Tuple[int, int],
+    anchor: Tuple[int, int],
+    focus_depth_mm: Optional[float],
+    config: OfflineConfig,
+) -> Tuple[int, int]:
+    x, y = validate_focus_anchor(image_size, anchor)
+    offset_mm = validate_focus_y_offset_mm(config.focus_y_offset_mm)
+    if offset_mm == 0.0:
+        return x, y
+    if focus_depth_mm is None or focus_depth_mm <= 0.0:
+        raise ValueError("provider depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
+    width, height = image_size
+    offset_px = int(round(offset_mm * float(height) / float(focus_depth_mm)))
+    offset_anchor = (x, y + offset_px)
+    try:
+        return validate_focus_anchor(image_size, offset_anchor)
+    except ValueError as exc:
+        raise ValueError(
+            "focus offset ROI anchor outside image bounds "
+            f"focus={anchor} offset_mm={offset_mm} depth_mm={focus_depth_mm} "
+            f"offset_px={offset_px} size={(width, height)}"
+        ) from exc
+
+
 def clip_focus_guide_endpoint(
     image_size: Tuple[int, int],
     focus_anchor: Tuple[int, int],
@@ -2026,11 +2051,13 @@ class OfflineSessionManager:
         anchor = parse_focus_point(focus_point) if focus_point is not None else None
         roi2_rect = None
         roi3_rect = None
+        offset_anchor = None
         used_cache = False
         if anchor is not None:
             height, width = before_frame.shape[:2]
-            roi2_rect = compute_roi_region((width, height), anchor, self._config.roi2_extension_params)
-            roi3_rect = compute_roi_region((width, height), anchor, self._config.roi3_extension_params)
+            offset_anchor = resolve_offset_focus_anchor((width, height), anchor, focus_depth_mm, self._config)
+            roi2_rect = compute_roi_region((width, height), offset_anchor, self._config.roi2_extension_params)
+            roi3_rect = compute_roi_region((width, height), offset_anchor, self._config.roi3_extension_params)
         if anchor is None or roi2_rect is None or roi3_rect is None:
             cached_anchor, cached_roi2, cached_roi3 = self._get_cached_roi_state()
             if cached_anchor is not None and cached_roi2 is not None and cached_roi3 is not None:
@@ -2053,6 +2080,7 @@ class OfflineSessionManager:
             provider_depth=provider_depth,
             focus_depth_mm=focus_depth_mm,
             parsed_anchor=[int(anchor[0]), int(anchor[1])] if anchor is not None else None,
+            offset_anchor=[int(offset_anchor[0]), int(offset_anchor[1])] if offset_anchor is not None else None,
             used_cache=bool(used_cache),
             roi2_rect=[int(v) for v in roi2_rect] if roi2_rect is not None else None,
             roi3_rect=[int(v) for v in roi3_rect] if roi3_rect is not None else None,
@@ -2930,21 +2958,6 @@ class OfflineSessionManager:
                     session.after_mean = roi_gray_mean(session.after, session.roi2_rect)
                     session.roi2_diff = float(session.after_mean) - float(session.before_mean)
                     session.final_roi2_color = "green" if session.roi2_diff >= float(self._config.difference_threshold) else "red"
-                    if session.final_roi2_color == "red":
-                        roi3_override_start = self._finalization_stage_begin(session, "roi3_override")
-                        try:
-                            self._apply_roi3_overrides(session)
-                            self._finalization_stage_end(
-                                session,
-                                "roi3_override",
-                                roi3_override_start,
-                                success=True,
-                                roi3_override_applied=bool(session.roi3_override_applied),
-                                roi3_override_method=session.roi3_override_method,
-                            )
-                        except Exception as exc:
-                            self._finalization_stage_end(session, "roi3_override", roi3_override_start, success=False, error=str(exc))
-                            raise
                 self._finalization_stage_end(
                     session,
                     "roi2_metrics",

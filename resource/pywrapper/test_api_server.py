@@ -801,7 +801,7 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertEqual(stop["roi2_color"], "red")
 
-    def test_offline_roi3_g1_g2_override_can_flip_red_to_green(self):
+    def test_offline_roi3_g1_g2_metrics_do_not_flip_red_to_green(self):
         before = np.full((200, 200, 3), 10, dtype=np.uint8)
         after = np.full((200, 200, 3), 200, dtype=np.uint8)
         after[99:101, 99:101] = 12
@@ -819,17 +819,41 @@ class ApiServerTests(unittest.TestCase):
                 difference_threshold=5.0,
                 roi3_g1_g2_override={"enabled": True, "g1_threshold": 98.0, "g2_threshold": 20.0, "use_peak_max": False},
                 roi3_column_diff_override={"enabled": False, "g1_threshold": 99.0, "threshold": 15.0, "use_peak_max": False},
+                focus_y_offset_mm=0.0,
             ),
-            logger=self.make_null_logger("test_offline_roi3_g1_g2_override_can_flip_red_to_green"),
+            logger=self.make_null_logger("test_offline_roi3_g1_g2_metrics_do_not_flip_red_to_green"),
         )
 
         manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
         stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
 
         self.assertEqual(stop["roi2_diff"], 2.0)
-        self.assertEqual(stop["roi2_color"], "green")
-        self.assertTrue(stop["roi3_override_applied"])
-        self.assertEqual(stop["roi3_override_method"], "roi3_g1_g2")
+        self.assertEqual(stop["roi2_color"], "red")
+        self.assertFalse(stop["roi3_override_applied"])
+        self.assertIsNone(stop["roi3_override_method"])
+
+    def test_offline_roi2_rect_uses_focus_y_offset(self):
+        frames = [
+            api_server.FrameSnapshot(np.full((200, 200, 3), 10, dtype=np.uint8), 1, 1.0),
+            api_server.FrameSnapshot(np.full((200, 200, 3), 12, dtype=np.uint8), 2, 2.0),
+        ]
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "100.0"},
+            frame_fetcher=lambda: frames.pop(0),
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                roi2_extension_params={"left": 5, "right": 5, "top": 6, "bottom": 6},
+                roi3_extension_params={"left": 5, "right": 5, "top": 6, "bottom": 6},
+                difference_threshold=5.0,
+                focus_y_offset_mm=2.5,
+            ),
+            logger=self.make_null_logger("test_offline_roi2_rect_uses_focus_y_offset"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+        stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+
+        self.assertEqual(stop["roi2_rect"], [95, 99, 105, 111])
 
     def test_offline_peak_selection_uses_second_boundary_frames_not_stop_frame(self):
         frames = self.SequenceFrameSource(
@@ -1659,8 +1683,8 @@ class ApiServerTests(unittest.TestCase):
 
             actual = np.array(api_server.Image.open(Path(stop["diff_path"])))
             self.assertEqual(tuple(actual[0, 0]), (255, 0, 0))
-            self.assertEqual(tuple(actual[84, 80]), (0, 255, 0))
-            self.assertEqual(tuple(actual[75, 80]), (255, 255, 0))
+            self.assertEqual(tuple(actual[94, 80]), (0, 255, 0))
+            self.assertEqual(tuple(actual[85, 80]), (255, 255, 0))
             self.assertEqual(tuple(actual[100, 80]), (128, 0, 128))
 
     def test_offline_diff_image_draws_roi4_marker(self):
