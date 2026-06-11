@@ -1473,6 +1473,49 @@ class ApiServerTests(unittest.TestCase):
             self.assertTrue(any('"event": "before_saved"' in line for line in meta_lines))
             self.assertTrue(any('"event": "after_saved"' in line for line in meta_lines))
 
+    def test_offline_debug_final_before_after_names_include_source_frame_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
+                ]
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    roi2_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    debug_save_enabled=True,
+                    debug_save_dir=tmp,
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_debug_final_before_after_names_include_source_frame_name"),
+            )
+
+            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.12)
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            debug_dir = Path(start["debug_dir"])
+            before_files = [path.name for path in debug_dir.glob("final_before_*.png")]
+            after_files = [path.name for path in debug_dir.glob("final_after_*.png")]
+            self.assertEqual(len(before_files), 1)
+            self.assertEqual(len(after_files), 1)
+            self.assertTrue(before_files[0].startswith("final_before_00001_"))
+            self.assertTrue(before_files[0].endswith("_frame.png"))
+            self.assertTrue(after_files[0].startswith("final_after_00006_"))
+            self.assertTrue(after_files[0].endswith("_frame.png"))
+
     def test_offline_peak_logs_threshold_and_after_selection(self):
         logger, stream = self.make_stream_logger("test_offline_peak_logs_threshold_and_after_selection")
         frames = self.SequenceFrameSource(

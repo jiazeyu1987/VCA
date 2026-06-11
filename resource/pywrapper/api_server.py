@@ -904,6 +904,12 @@ def format_buffered_frame_name(frame_index: int, ts: float, tag: str) -> str:
     return f"{int(frame_index):05d}_{format_frame_timestamp(ts)}_{tag}.png".replace(":", "-")
 
 
+def format_final_debug_frame_name(label: str, source_name: Optional[str]) -> str:
+    if not source_name:
+        return f"final_{label}.png"
+    return f"final_{label}_{Path(source_name).stem}.png"
+
+
 def write_jsonl_line(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -2380,6 +2386,17 @@ class OfflineSessionManager:
             meta_jsonl=str(meta_jsonl),
         )
 
+    def _find_buffered_frame_name(self, session: OfflineSession, seq: Optional[int], ts: Optional[float]) -> Optional[str]:
+        if seq is None:
+            return None
+        for record in session.frame_buffer:
+            if int(record.seq) != int(seq):
+                continue
+            if ts is not None and abs(float(record.ts) - float(ts)) >= 0.000001:
+                continue
+            return format_buffered_frame_name(record.frame_index, record.ts, record.tag)
+        return None
+
     def _save_debug_outputs(self, session: OfflineSession) -> None:
         if not self._config.debug_save_enabled or not session.debug_dir:
             return
@@ -2401,10 +2418,14 @@ class OfflineSessionManager:
         meta.update(build_roi4_diagnostics(session))
         if session.before is not None and session.roi2_rect is not None and session.roi3_rect is not None:
             self._debug_saver.save_stage(session.debug_dir, "before", session.before, session.roi2_rect, session.roi3_rect)
+            before_source_name = self._find_buffered_frame_name(session, session.before_seq, session.before_ts)
             write_png(Path(session.debug_dir) / "final_before.png", session.before)
+            write_png(Path(session.debug_dir) / format_final_debug_frame_name("before", before_source_name), session.before)
         if session.after is not None and session.roi2_rect is not None and session.roi3_rect is not None:
             self._debug_saver.save_stage(session.debug_dir, "after", session.after, session.roi2_rect, session.roi3_rect)
+            after_source_name = self._find_buffered_frame_name(session, session.after_seq, session.after_ts)
             write_png(Path(session.debug_dir) / "final_after.png", session.after)
+            write_png(Path(session.debug_dir) / format_final_debug_frame_name("after", after_source_name), session.after)
         if session.before is not None and session.after is not None:
             diff_with_overlay = render_diff_with_overlay(session, self._config)
             if diff_with_overlay is not None:
