@@ -1123,6 +1123,53 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(stop["roi4_rect"], [16, 306, 577, 495])
         self.assertAlmostEqual(stop["roi4_candidate_area_ratio"], 0.0)
 
+    def test_offline_roi4_selector_is_primary_before_roi1_boundary_after(self):
+        frames = self.SequenceFrameSource(
+            [
+                self.make_roi4_frame(10, 10, 1),
+                self.make_roi4_frame(11, 10, 2),
+                self.make_roi4_frame(60, 80, 3),
+                self.make_roi4_frame(60, 80, 4),
+                self.make_roi4_frame(20, 10, 5),
+                self.make_roi4_frame(20, 10, 6),
+                self.make_roi4_frame(12, 10, 7),
+                self.make_roi4_frame(12, 10, 8),
+                self.make_roi4_frame(12, 10, 9),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(100, 100)", "depth": "1000"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                roi4_rect=(16, 306, 577, 495),
+                roi4_after_selector={
+                    "enabled": True,
+                    "block_size": 24,
+                    "gray_diff_threshold": 15.0,
+                    "candidate_area_ratio_threshold": 3.0,
+                    "descent_low_frame_number": 2,
+                },
+                difference_threshold=5.0,
+            ),
+            logger=self.make_null_logger("test_offline_roi4_selector_is_primary_before_roi1_boundary_after"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.12)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertTrue(stop["roi4_after_selector_applied"])
+        self.assertEqual(stop["roi4_after_frame_index"], 6)
+        self.assertEqual(stop["roi4_after_method"], "roi4_mask_descent_second")
+        self.assertEqual(stop["after_seq"], 6)
+        self.assertEqual(stop["after_method"], "roi4_mask_descent_second")
+
     def test_offline_roi4_selector_preserves_fallback_after_without_low_high_low_sequence(self):
         frames = self.SequenceFrameSource(
             [

@@ -2069,7 +2069,7 @@ class OfflineSessionManager:
             return None, None, None, {"roi3_mean": None, "g1": None, "g2": None, "column_diff": None}
         return session.after, None, "after", compute_roi3_metrics(session.after, session.roi3_rect)
 
-    def _apply_roi4_after_selector_if_needed(self, session: OfflineSession) -> None:
+    def _apply_roi4_after_selector_if_needed(self, session: OfflineSession, require_fallback_after: bool = True) -> None:
         selector = dict(self._config.roi4_after_selector or {})
         if not bool(selector.get("enabled", False)):
             self._offline_diag(
@@ -2080,7 +2080,7 @@ class OfflineSessionManager:
                 after_method=session.after_method,
             )
             return
-        if session.after_method not in ROI4_FALLBACK_AFTER_METHODS:
+        if require_fallback_after and session.after_method not in ROI4_FALLBACK_AFTER_METHODS:
             self._offline_diag(
                 "roi4_after_selector_skip",
                 point_id=session.point_id,
@@ -2114,6 +2114,7 @@ class OfflineSessionManager:
                 "roi4_after_selector_begin",
                 point_id=session.point_id,
                 capture_source="image_matrix",
+                require_fallback_after=bool(require_fallback_after),
                 original_after_method=session.after_method,
                 original_after_seq=int(session.after_seq) if session.after_seq is not None else None,
                 configured_roi4_rect=[int(v) for v in self._config.roi4_rect] if self._config.roi4_rect is not None else None,
@@ -2763,7 +2764,9 @@ class OfflineSessionManager:
                 session.before_name = format_frame_timestamp(before_default_ts) if before_default_ts is not None else ""
             if self._config.offline_peak_enabled and before_gray_mean is not None and pending_error_response is None:
                 try:
-                    self._apply_roi1_boundary_selection(session, before_gray_mean)
+                    self._apply_roi4_after_selector_if_needed(session, require_fallback_after=False)
+                    if not session.roi4_after_selector_applied:
+                        self._apply_roi1_boundary_selection(session, before_gray_mean)
                 except Exception as exc:
                     pending_error_response = {
                         "success": False,
