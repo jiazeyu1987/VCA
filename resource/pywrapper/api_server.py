@@ -939,10 +939,10 @@ def build_diff_overlay_judgement_lines(session: "OfflineSession", config: Offlin
     thr = float(config.difference_threshold) if config.difference_threshold is not None else None
     roi2_ok = bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr))
     roi2_value_line = (
-        "2. ROI2: A:N/A,B:N/A,D:N/A"
+        "2. A:N/A,B:N/A,D:N/A"
         if session.after_mean is None or session.before_mean is None or session.roi2_diff is None
         else (
-            f"2. ROI2: A:{float(session.after_mean):.3f},"
+            f"2. A:{float(session.after_mean):.3f},"
             f"B:{float(session.before_mean):.3f},"
             f"D:{float(session.roi2_diff):.3f}"
         )

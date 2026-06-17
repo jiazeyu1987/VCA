@@ -1634,7 +1634,7 @@ class ApiServerTests(unittest.TestCase):
         )
 
         self.assertEqual(lines[0], "1. ROI2: current=2.000 / threshold=5.000")
-        self.assertEqual(lines[1], "2. ROI2: A:12.000,B:10.000,D:2.000")
+        self.assertEqual(lines[1], "2. A:12.000,B:10.000,D:2.000")
         self.assertEqual(len(lines), 2)
         self.assertEqual(len(line_ok), 2)
         self.assertFalse(line_ok[0])
