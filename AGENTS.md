@@ -1,1 +1,2 @@
 - Thread baseline: 当前机器默认无设备连接；发布代码必须保持真实设备连接能力。
+- Thread baseline: 完成任务后先推送代码，再执行publish_release.bat发布并再次推送一次。
