@@ -941,7 +941,7 @@ class ApiServerTests(unittest.TestCase):
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
         self.assertEqual(stop["info"], "offline_stop_completed")
-        self.assertEqual(stop["roi2_before_mean"], 11.0)
+        self.assertEqual(stop["roi2_before_mean"], 10.0)
         self.assertEqual(stop["roi2_after_mean"], 14.0)
         self.assertEqual(stop["roi2_color"], "red")
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
@@ -985,9 +985,9 @@ class ApiServerTests(unittest.TestCase):
         stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
         self.assertEqual(stop["info"], "offline_stop_completed")
-        self.assertEqual(stop["roi2_before_mean"], 11.0)
+        self.assertEqual(stop["roi2_before_mean"], 10.0)
         self.assertEqual(stop["roi2_after_mean"], 14.0)
-        self.assertEqual(stop["roi2_diff"], 3.0)
+        self.assertEqual(stop["roi2_diff"], 4.0)
         self.assertEqual(stop["roi2_color"], "green")
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
 
@@ -1639,10 +1639,10 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag session_thread_enter:", log_text)
         self.assertIn("OFFLINE diag before_captured:", log_text)
         self.assertIn("OFFLINE diag peak_threshold_initialized:", log_text)
-        self.assertIn("OFFLINE diag before_selected:", log_text)
+        self.assertNotIn("OFFLINE diag before_selected:", log_text)
         self.assertIn("OFFLINE diag roi1_boundary_interval_selected:", log_text)
         self.assertIn("OFFLINE diag after_selected:", log_text)
-        self.assertIn('"before_method": "roi1_boundary_before2"', log_text)
+        self.assertIn('"before_index": 1', log_text)
         self.assertIn('"after_method": "roi1_boundary_after2"', log_text)
 
     def test_offline_diff_image_contains_overlay_not_raw_positive_diff(self):

@@ -2068,12 +2068,12 @@ class OfflineSessionManager:
         before_index = active_start - ROI1_BOUNDARY_OFFSET
         if before_index < 0:
             raise ValueError("OFFLINE requires at least two frames before treatment active interval")
+        final_before_index = int(session.initial_before_record.frame_index) if session.initial_before_record is not None else int(records[0].frame_index)
         after_index = active_end + ROI1_BOUNDARY_OFFSET
         after_fallback_used = False
         if after_index >= len(records):
             after_index = len(records) - 1
             after_fallback_used = True
-        self._select_before_record_for_roi2(session, records[before_index], "roi1_boundary_before2")
         after_reason = "roi1_boundary_after2_fallback_last" if after_fallback_used else "roi1_boundary_after2"
         self._select_after_record_for_roi2(session, records[after_index], after_reason)
         self._append_frame_buffer(
@@ -2093,7 +2093,8 @@ class OfflineSessionManager:
             core_end_index=int(records[core_end].frame_index),
             active_start_index=int(records[active_start].frame_index),
             active_end_index=int(records[active_end].frame_index),
-            before_index=int(records[before_index].frame_index),
+            before_index=final_before_index,
+            boundary_before_candidate_index=int(records[before_index].frame_index),
             after_index=int(records[after_index].frame_index),
             active_threshold=round(float(active_threshold), 6),
             active_extension_threshold=round(float(active_extension_threshold), 6),
