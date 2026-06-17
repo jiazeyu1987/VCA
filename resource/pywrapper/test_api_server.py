@@ -477,6 +477,24 @@ class ApiServerTests(unittest.TestCase):
         )
 
         self.assertEqual(config.focus_y_offset_mm, 1.0)
+        self.assertEqual(config.frame_history_offset, 3)
+
+    def test_parse_offline_config_reads_frame_history_offset(self):
+        config = api_server.parse_offline_config(
+            {
+                "offline_frame_history_offset": 5,
+                "peak_detect": {
+                    "roi2_extension_params": {"left": 11, "right": 12, "top": 13, "bottom": 14},
+                    "roi3_extension_params": {"left": 21, "right": 22, "top": 23, "bottom": 24},
+                    "difference_threshold": 1.5,
+                    "roi4_after_selector": {"enabled": False},
+                },
+                "offline_tmp_frames": {"enabled": False, "dir": "D:/software_data/tmp"},
+            },
+            self.make_null_logger("test_parse_offline_config_reads_frame_history_offset"),
+        )
+
+        self.assertEqual(config.frame_history_offset, 5)
 
     def test_parse_offline_config_defaults_roi4_to_bottom_30_percent_when_selector_enabled(self):
         config = api_server.parse_offline_config(
@@ -2624,6 +2642,27 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(frame.image.shape, (512, 600, 4))
         self.assertEqual(frame.seq, 1)
         self.assertNotIn("image callback received", stream.getvalue())
+
+    def test_mobile_comm_engine_returns_configured_history_frame(self):
+        comm = Mock()
+        logger = self.make_null_logger("test_mobile_comm_engine_returns_configured_history_frame")
+        engine = api_server.MobileCommEngine(
+            comm,
+            logger,
+            hwnd_factory=lambda: 12345,
+            hwnd_destroyer=lambda hwnd: None,
+            stream_interval_s=0.01,
+            frame_history_offset=3,
+        )
+
+        for value in range(1, 6):
+            image = np.full((2, 2, 1), value, dtype=np.uint8)
+            engine._on_image_info_received(None, image)
+
+        frame = engine.get_latest_frame()
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.seq, 2)
+        self.assertEqual(int(frame.image[0, 0, 0]), 2)
 
     def make_provider_for_reconnect_tests(self, states):
         provider = object.__new__(api_server.PyMobileCommProvider)

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -133,6 +134,7 @@ class OfflineConfig:
     focus_guide_angle_degrees: float = GUIDE_LINE_ANGLE_DEGREES
     focus_guide_line_width: int = GUIDE_LINE_WIDTH
     focus_y_offset_mm: float = FOCUS_Y_OFFSET_MM
+    frame_history_offset: int = 3
 
     @staticmethod
     def default() -> "OfflineConfig":
@@ -1205,6 +1207,9 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         focus_guides.get("line_width", GUIDE_LINE_WIDTH),
     )
     focus_y_offset_mm = validate_focus_y_offset_mm(focus_guides.get("y_offset_mm", FOCUS_Y_OFFSET_MM))
+    frame_history_offset = int(settings.get("offline_frame_history_offset", 3))
+    if frame_history_offset < 0:
+        raise ValueError("settings.offline_frame_history_offset must be >= 0")
     image_output_dir = settings.get("image_output_dir", "D:/software_data/imgs")
     db_root_dir = settings.get("db_root_dir", "D:/software_data")
     result_flag_path = settings.get("result_flag_path", "D:/software_data/result.txt")
@@ -1235,12 +1240,13 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         focus_guide_angle_degrees=focus_guide_angle_degrees,
         focus_guide_line_width=focus_guide_line_width,
         focus_y_offset_mm=focus_y_offset_mm,
+        frame_history_offset=frame_history_offset,
     )
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
         "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s roi4_bottom_region_ratio=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
         "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
-        "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s",
+        "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s frame_history_offset=%s",
         config.screenshot_test_enabled,
         config.screenshot_capture_bbox,
         config.peak_detect_enabled,
@@ -1261,6 +1267,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.focus_guide_angle_degrees,
         config.focus_guide_line_width,
         config.focus_y_offset_mm,
+        config.frame_history_offset,
     )
     return config
 
@@ -1307,17 +1314,19 @@ class MobileCommEngine:
         hwnd_factory: Callable[[], int] = create_hidden_window,
         hwnd_destroyer: Callable[[int], None] = destroy_window,
         stream_interval_s: float = 0.016,
+        frame_history_offset: int = 3,
     ):
         self._comm = comm
         self._logger = logger
         self._hwnd_factory = hwnd_factory
         self._hwnd_destroyer = hwnd_destroyer
         self._stream_interval_s = stream_interval_s
+        self._frame_history_offset = max(0, int(frame_history_offset))
         self._hwnd: Optional[int] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._frame_lock = threading.Lock()
-        self._latest_frame: Optional[FrameSnapshot] = None
+        self._frame_history: deque[FrameSnapshot] = deque(maxlen=max(1, self._frame_history_offset + 1))
         self._frame_seq = 0
         self._state_lock = threading.Lock()
         self._latest_state: Optional[DeviceStateSnapshot] = None
@@ -1371,13 +1380,17 @@ class MobileCommEngine:
             return
         with self._frame_lock:
             self._frame_seq += 1
-            self._latest_frame = FrameSnapshot(frame, self._frame_seq, time.time())
+            self._frame_history.append(FrameSnapshot(frame, self._frame_seq, time.time()))
 
-    def get_latest_frame(self) -> Optional[FrameSnapshot]:
+    def get_latest_frame(self, history_offset: Optional[int] = None) -> Optional[FrameSnapshot]:
         with self._frame_lock:
-            if self._latest_frame is None:
+            if not self._frame_history:
                 return None
-            return FrameSnapshot(np.array(self._latest_frame.image, copy=True), self._latest_frame.seq, self._latest_frame.ts)
+            offset = self._frame_history_offset if history_offset is None else max(0, int(history_offset))
+            if offset >= len(self._frame_history):
+                offset = len(self._frame_history) - 1
+            snapshot = self._frame_history[-1 - offset]
+            return FrameSnapshot(np.array(snapshot.image, copy=True), snapshot.seq, snapshot.ts)
 
     def get_latest_state(self) -> Optional[DeviceStateSnapshot]:
         with self._state_lock:
@@ -1407,8 +1420,9 @@ class MobileCommEngine:
 
 
 class PyMobileCommProvider:
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(self, logger: Optional[logging.Logger] = None, frame_history_offset: int = 3):
         self._logger = logger or logging.getLogger("pywrapper_api_server")
+        self._frame_history_offset = max(0, int(frame_history_offset))
         self._logger.info("initializing PyMobileComm provider")
         module = import_mobile_comm()
         self._logger.info("PyMobileComm module imported from: %s", getattr(module, "__file__", "<unknown>"))
@@ -1420,7 +1434,7 @@ class PyMobileCommProvider:
         self._pending_provider_error: Optional[Exception] = None
         self._logger.info("registering SetOnControlOnceMsg callback")
         self._comm.SetOnControlOnceMsg(self._on_control_received)
-        self._engine = MobileCommEngine(self._comm, self._logger)
+        self._engine = MobileCommEngine(self._comm, self._logger, frame_history_offset=self._frame_history_offset)
         self._engine.configure()
         log_adb_devices(self._logger)
         self._logger.info("calling RestartAdbServer")
@@ -3556,7 +3570,7 @@ def main(argv=None) -> int:
     logger = build_logger()
     log_process_environment(logger)
     offline_config = load_offline_config(logger)
-    provider = PyMobileCommProvider(logger)
+    provider = PyMobileCommProvider(logger, frame_history_offset=offline_config.frame_history_offset)
     offline_manager = OfflineSessionManager(
         provider_fetcher=provider.fetch,
         frame_fetcher=provider.get_latest_frame,
