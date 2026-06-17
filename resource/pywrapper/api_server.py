@@ -938,6 +938,15 @@ def write_jsonl_line(path: Path, payload: dict) -> None:
 def build_diff_overlay_judgement_lines(session: "OfflineSession", config: OfflineConfig):
     thr = float(config.difference_threshold) if config.difference_threshold is not None else None
     roi2_ok = bool(session.roi2_diff is not None and thr is not None and float(session.roi2_diff) >= float(thr))
+    roi2_value_line = (
+        "2. ROI2: A:N/A,B:N/A,D:N/A"
+        if session.after_mean is None or session.before_mean is None or session.roi2_diff is None
+        else (
+            f"2. ROI2: A:{float(session.after_mean):.3f},"
+            f"B:{float(session.before_mean):.3f},"
+            f"D:{float(session.roi2_diff):.3f}"
+        )
+    )
     first_line = (
         "1. ROI2: current=N/A / threshold=N/A"
         if session.roi2_diff is None or thr is None
@@ -945,9 +954,7 @@ def build_diff_overlay_judgement_lines(session: "OfflineSession", config: Offlin
     )
     lines = [
         first_line,
-        "2. ROI2: diff/threshold=N/A"
-        if session.roi2_diff is None or thr is None
-        else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
+        roi2_value_line,
     ]
     line_ok = [
         roi2_ok,
