@@ -691,6 +691,36 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn('"debug_save_enabled": false', log_text)
         self.assertIn("OFFLINE diag stop_decision:", log_text)
 
+    def test_offline_first_screenshot_timing_logs_receive_and_capture_timestamps(self):
+        logger, stream = self.make_stream_logger("test_offline_first_screenshot_timing_logs_receive_and_capture_timestamps")
+        frames = self.SequenceFrameSource([
+            api_server.FrameSnapshot(np.zeros((20, 20, 3), dtype=np.uint8), 1, 1.0),
+            api_server.FrameSnapshot(np.ones((20, 20, 3), dtype=np.uint8), 2, 2.0),
+        ])
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig.default(),
+            logger=logger,
+        )
+
+        start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.05)
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(start, {"success": True, "info": "offline_started", "point_id": 123})
+        log_text = stream.getvalue()
+        self.assertIn("OFFLINE diag handle:", log_text)
+        self.assertIn('"point_id": 123', log_text)
+        self.assertIn('"offline_received_wall_time":', log_text)
+        self.assertIn('"offline_received_ts":', log_text)
+        self.assertIn('"offline_received_perf_counter_ns":', log_text)
+        self.assertIn("OFFLINE diag first_screenshot_timing:", log_text)
+        self.assertIn('"first_screenshot_wall_time":', log_text)
+        self.assertIn('"first_screenshot_ts": 1.0', log_text)
+        self.assertIn('"first_screenshot_frame_seq": 1', log_text)
+        self.assertRegex(log_text, r'"offline_receive_to_first_screenshot_ms": [0-9]+(\.[0-9]+)?')
+
     def test_offline_start_fails_without_focus_point(self):
         frame = api_server.FrameSnapshot(np.zeros((20, 20, 3), dtype=np.uint8), 1, 1.0)
         manager = api_server.OfflineSessionManager(
@@ -1394,10 +1424,13 @@ class ApiServerTests(unittest.TestCase):
         manager._active_session = previous
         called = {}
 
-        def fake_start(point_id, duration_s, is_save):
+        def fake_start(point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns):
             called["point_id"] = point_id
             called["duration_s"] = duration_s
             called["is_save"] = is_save
+            called["received_wall_time_is_set"] = bool(received_wall_time)
+            called["received_ts_type"] = type(received_ts).__name__
+            called["received_perf_counter_ns_type"] = type(received_perf_counter_ns).__name__
             return {"success": True, "info": "offline_started", "point_id": point_id}
 
         manager._start_locked = fake_start
@@ -1407,7 +1440,17 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(result, {"success": True, "info": "offline_started", "point_id": 222})
         self.assertTrue(previous.stop_event.is_set())
         self.assertEqual(probe.calls, [2])
-        self.assertEqual(called, {"point_id": 222, "duration_s": 5.0, "is_save": False})
+        self.assertEqual(
+            called,
+            {
+                "point_id": 222,
+                "duration_s": 5.0,
+                "is_save": False,
+                "received_wall_time_is_set": True,
+                "received_ts_type": "float",
+                "received_perf_counter_ns_type": "int",
+            },
+        )
 
     def test_offline_switch_logs_wait_details(self):
         logger, stream = self.make_stream_logger("test_offline_switch_logs_wait_details")
@@ -1428,7 +1471,7 @@ class ApiServerTests(unittest.TestCase):
         previous.finished_event = threading.Event()
         previous.thread = self.FakeThread()
         manager._active_session = previous
-        manager._start_locked = lambda point_id, duration_s, is_save: {"success": True, "info": "offline_started", "point_id": point_id}
+        manager._start_locked = lambda point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns: {"success": True, "info": "offline_started", "point_id": point_id}
 
         manager.handle('{"point_id": 222, "time_out": 5, "is_save": false}')
 

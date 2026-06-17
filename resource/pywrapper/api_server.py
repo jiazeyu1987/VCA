@@ -163,6 +163,9 @@ class OfflineSession:
     duration_s: float
     is_save: bool
     stop_event: threading.Event
+    received_wall_time: Optional[str] = None
+    received_ts: Optional[float] = None
+    received_perf_counter_ns: Optional[int] = None
     capture_done_event: threading.Event = field(default_factory=threading.Event)
     finished_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
@@ -1677,6 +1680,29 @@ class OfflineSessionManager:
         payload["capture_source"] = self._capture_source
         getattr(self._logger, level, self._logger.info)("OFFLINE diag %s: %s", event, safe_json_text(payload))
 
+    def _log_first_screenshot_timing(self, session: OfflineSession, frame: FrameSnapshot, frame_index: int, roi1_gray: float) -> None:
+        received_ts = session.received_ts
+        received_perf_counter_ns = session.received_perf_counter_ns
+        now_wall_time = online_wall_time()
+        now_perf_counter_ns = time.perf_counter_ns()
+        elapsed_ms = None
+        if received_perf_counter_ns is not None:
+            elapsed_ms = round(float(now_perf_counter_ns - int(received_perf_counter_ns)) / 1_000_000.0, 3)
+        self._offline_diag(
+            "first_screenshot_timing",
+            point_id=session.point_id,
+            offline_received_wall_time=session.received_wall_time,
+            offline_received_ts=round(float(received_ts), 6) if received_ts is not None else None,
+            offline_received_perf_counter_ns=received_perf_counter_ns,
+            first_screenshot_wall_time=now_wall_time,
+            first_screenshot_ts=round(float(frame.ts), 6),
+            first_screenshot_frame_seq=int(frame.seq),
+            first_screenshot_frame_index=int(frame_index),
+            first_screenshot_roi1_gray=round(float(roi1_gray), 6),
+            offline_receive_to_first_screenshot_ms=elapsed_ms,
+            first_screenshot_perf_counter_ns=now_perf_counter_ns,
+        )
+
     def _elapsed_ms_since(self, start_ns: Optional[int], now_ns: Optional[int] = None) -> Optional[float]:
         if start_ns is None:
             return None
@@ -1790,6 +1816,9 @@ class OfflineSessionManager:
         except Exception:
             return {"success": False, "info": "invalid_time_out", "point_id": point_id}
         is_save = bool(arg_obj["is_save"])
+        received_wall_time = online_wall_time()
+        received_ts = time.time()
+        received_perf_counter_ns = time.perf_counter_ns()
 
         with self._lock:
             self._prune_orphans_locked()
@@ -1798,14 +1827,21 @@ class OfflineSessionManager:
             accepted = int(self._offline_point_req_count.get(point_key, 0))
             if accepted >= 2:
                 return {"success": False, "info": "offline_ignored_extra_request", "point_id": point_id}
-            self._offline_diag(
-                "handle",
-                point_id=point_id,
-                action="stop" if active is not None and active.point_id == point_id else "start",
-                capture_source="image_matrix",
-                active_session_count=1 if active is not None else 0,
-            )
-            if active is not None and active.point_id == point_id:
+            action = "stop" if active is not None and active.point_id == point_id else "start"
+            handle_fields = {
+                "point_id": point_id,
+                "action": action,
+                "capture_source": "image_matrix",
+                "active_session_count": 1 if active is not None else 0,
+            }
+            if action == "start":
+                handle_fields.update(
+                    offline_received_wall_time=received_wall_time,
+                    offline_received_ts=round(float(received_ts), 6),
+                    offline_received_perf_counter_ns=received_perf_counter_ns,
+                )
+            self._offline_diag("handle", **handle_fields)
+            if action == "stop":
                 self._offline_point_req_count[point_key] = accepted + 1
                 return self._stop_locked(active)
             if active is not None:
@@ -1838,9 +1874,24 @@ class OfflineSessionManager:
                 self._orphans.append(active)
                 self._active_session = None
             self._offline_point_req_count[point_key] = accepted + 1
-            return self._start_locked(point_id, duration_s, is_save)
+            return self._start_locked(
+                point_id,
+                duration_s,
+                is_save,
+                received_wall_time,
+                received_ts,
+                received_perf_counter_ns,
+            )
 
-    def _start_locked(self, point_id, duration_s: float, is_save: bool) -> dict:
+    def _start_locked(
+        self,
+        point_id,
+        duration_s: float,
+        is_save: bool,
+        received_wall_time: str,
+        received_ts: float,
+        received_perf_counter_ns: int,
+    ) -> dict:
         debug_dir = None
         if self._config.debug_save_enabled:
             debug_dir = self._debug_saver.create_session_dir(self._config.debug_save_dir, point_id)
@@ -1849,6 +1900,9 @@ class OfflineSessionManager:
             duration_s=duration_s,
             is_save=is_save,
             stop_event=threading.Event(),
+            received_wall_time=received_wall_time,
+            received_ts=received_ts,
+            received_perf_counter_ns=received_perf_counter_ns,
             debug_dir=debug_dir,
             meta={"point_id": point_id, "duration_s": duration_s, "is_save": bool(is_save)},
         )
@@ -2807,6 +2861,7 @@ class OfflineSessionManager:
                     self._initialize_focus_and_rois(session, frame_image)
                     if session.roi2_rect is not None:
                         session.before_mean = roi_gray_mean(frame_image, session.roi2_rect)
+                    self._log_first_screenshot_timing(session, frame, frame_index, roi1_gray)
                     self._offline_diag(
                         "before_captured",
                         point_id=session.point_id,
