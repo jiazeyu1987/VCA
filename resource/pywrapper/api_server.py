@@ -873,14 +873,8 @@ def draw_differ_roi_markers(
     session: "OfflineSession",
     focus_marker_anchor: Optional[Tuple[int, int]] = None,
 ) -> None:
-    width, height = image_size
-    draw_marker_rect(draw, image_size, (0, 0, width, height), ROI1_MARKER_COLOR)
     if session.roi2_rect is not None:
         draw_marker_rect(draw, image_size, session.roi2_rect, ROI2_MARKER_COLOR)
-    if session.roi3_rect is not None:
-        draw_marker_rect(draw, image_size, session.roi3_rect, ROI3_MARKER_COLOR)
-    if session.roi4_rect is not None:
-        draw_marker_rect(draw, image_size, session.roi4_rect, ROI4_MARKER_COLOR)
     if focus_marker_anchor is not None:
         draw_focus_marker(draw, image_size, focus_marker_anchor)
 
@@ -954,25 +948,10 @@ def build_diff_overlay_judgement_lines(session: "OfflineSession", config: Offlin
         "2. ROI2: diff/threshold=N/A"
         if session.roi2_diff is None or thr is None
         else f"2. ROI2: d={float(session.roi2_diff):.3f} / thr={float(thr):.3f}",
-        "3. ROI3(G1/G2): N/A"
-        if session.roi3_g1 is None or session.roi3_g2 is None
-        else f"3. ROI3: G1={float(session.roi3_g1):.2f} G2={float(session.roi3_g2):.2f}",
-        "4. ROI3(colDiff): N/A"
-        if session.roi3_column_diff is None
-        else f"4. ROI3: colDiff={float(session.roi3_column_diff):.2f}",
-        "5. ROI4: N/A"
-        if session.roi4_candidate_area_ratio is None or session.roi4_candidate_area_ratio_threshold is None
-        else (
-            f"5. ROI4: cand={float(session.roi4_candidate_area_ratio):.2f}% / "
-            f"thr={float(session.roi4_candidate_area_ratio_threshold):.2f}% frame={session.roi4_after_frame_index}"
-        ),
     ]
     line_ok = [
         roi2_ok,
         roi2_ok,
-        bool(session.roi3_override_method == "roi3_g1_g2"),
-        bool(session.roi3_override_method == "roi3_column_diff"),
-        bool(session.roi4_after_selector_applied),
     ]
     return lines, line_ok
 

@@ -1632,6 +1632,9 @@ class ApiServerTests(unittest.TestCase):
         )
 
         self.assertEqual(lines[0], "1. ROI2: current=2.000 / threshold=5.000")
+        self.assertEqual(lines[1], "2. ROI2: d=2.000 / thr=5.000")
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(line_ok), 2)
         self.assertFalse(line_ok[0])
         self.assertNotIn("OK", lines[0])
         self.assertNotIn("FAIL", lines[0])
@@ -1682,12 +1685,12 @@ class ApiServerTests(unittest.TestCase):
             stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
             actual = np.array(api_server.Image.open(Path(stop["diff_path"])))
-            self.assertEqual(tuple(actual[0, 0]), (255, 0, 0))
+            self.assertNotEqual(tuple(actual[0, 0]), (255, 0, 0))
             self.assertEqual(tuple(actual[94, 80]), (0, 255, 0))
-            self.assertEqual(tuple(actual[85, 80]), (255, 255, 0))
+            self.assertNotEqual(tuple(actual[85, 80]), (255, 255, 0))
             self.assertEqual(tuple(actual[100, 80]), (128, 0, 128))
 
-    def test_offline_diff_image_draws_roi4_marker(self):
+    def test_offline_diff_image_does_not_draw_roi4_marker(self):
         session = api_server.OfflineSession(
             point_id=123,
             duration_s=10.0,
@@ -1701,8 +1704,8 @@ class ApiServerTests(unittest.TestCase):
         actual = api_server.render_diff_with_overlay(session, api_server.OfflineConfig())
 
         self.assertIsNotNone(actual)
-        self.assert_pixel_near(actual, 10, 50, api_server.ROI4_MARKER_COLOR)
-        self.assert_pixel_near(actual, 89, 74, api_server.ROI4_MARKER_COLOR)
+        self.assertNotEqual(tuple(actual[50, 10]), api_server.ROI4_MARKER_COLOR)
+        self.assertNotEqual(tuple(actual[74, 89]), api_server.ROI4_MARKER_COLOR)
 
     def test_offline_final_images_draw_focus_guides_on_before_after_and_diff(self):
         with tempfile.TemporaryDirectory() as tmp:
