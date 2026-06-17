@@ -1514,6 +1514,8 @@ class ApiServerTests(unittest.TestCase):
             meta_lines = meta_jsonl.read_text(encoding="utf-8").splitlines()
             self.assertTrue(any('"event": "before_saved"' in line for line in meta_lines))
             self.assertTrue(any('"event": "after_saved"' in line for line in meta_lines))
+            self.assertTrue(list(debug_dir.glob("selected_before_00001_*.png")))
+            self.assertTrue(list(debug_dir.glob("selected_before_plus_offset_00004_*.png")))
 
     def test_offline_debug_final_before_after_names_include_source_frame_name(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -931,6 +931,10 @@ def format_final_debug_frame_name(label: str, source_name: Optional[str]) -> str
     return f"final_{label}_{Path(source_name).stem}.png"
 
 
+def format_selected_debug_frame_name(label: str, source_name: str) -> str:
+    return f"selected_{label}_{Path(source_name).stem}.png"
+
+
 def write_jsonl_line(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -2403,6 +2407,22 @@ class OfflineSessionManager:
                     },
                 )
                 after_written = True
+        before_record = self._find_buffered_frame_record(session, session.before_seq, session.before_ts)
+        if before_record is not None:
+            before_source_name = format_buffered_frame_name(before_record.frame_index, before_record.ts, before_record.tag)
+            write_png(Path(session.debug_dir) / format_selected_debug_frame_name("before", before_source_name), before_record.frame)
+            before_offset_seq = int(before_record.seq) + int(self._config.frame_history_offset)
+            before_offset_record = self._find_buffered_frame_record(session, before_offset_seq, None)
+            if before_offset_record is not None:
+                before_offset_source_name = format_buffered_frame_name(
+                    before_offset_record.frame_index,
+                    before_offset_record.ts,
+                    before_offset_record.tag,
+                )
+                write_png(
+                    Path(session.debug_dir) / format_selected_debug_frame_name("before_plus_offset", before_offset_source_name),
+                    before_offset_record.frame,
+                )
         self._offline_diag(
             "buffer_flush_completed",
             point_id=session.point_id,
@@ -2423,6 +2443,17 @@ class OfflineSessionManager:
             if ts is not None and abs(float(record.ts) - float(ts)) >= 0.000001:
                 continue
             return format_buffered_frame_name(record.frame_index, record.ts, record.tag)
+        return None
+
+    def _find_buffered_frame_record(self, session: OfflineSession, seq: Optional[int], ts: Optional[float]) -> Optional[OfflineFrameRecord]:
+        if seq is None:
+            return None
+        for record in session.frame_buffer:
+            if int(record.seq) != int(seq):
+                continue
+            if ts is not None and abs(float(record.ts) - float(ts)) >= 0.000001:
+                continue
+            return record
         return None
 
     def _save_debug_outputs(self, session: OfflineSession) -> None:
