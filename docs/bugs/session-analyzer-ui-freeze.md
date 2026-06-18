@@ -49,3 +49,5 @@ Expected behavior: opening a zip should not block the Tkinter event loop. The UI
 - Full analyzer unit test suite passed.
 - Rebuilt standalone exe passed CLI self-test with the reported zip.
 - Rebuilt standalone exe passed GUI responsiveness smoke with the reported zip.
+- Published `VA\session_timeline_analyzer.exe` passed CLI self-test with the reported zip.
+- Published `VA\session_timeline_analyzer.exe` passed GUI responsiveness smoke with `Responding=True` after 7 seconds.
