@@ -4,8 +4,10 @@ import argparse
 import io
 import json
 import math
+import queue
 import sys
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,6 +168,14 @@ class SessionPackage:
         self.source.close()
 
 
+@dataclass(frozen=True)
+class PackageLoadResult:
+    token: int
+    path: Path
+    package: SessionPackage | None = None
+    error: Exception | None = None
+
+
 @dataclass
 class TimelineViewport:
     start_ns: int
@@ -307,6 +317,12 @@ class SessionTimelineAnalyzerApp:
         self.drag_start_x: float | None = None
         self.drag_last_x: float | None = None
         self.drag_moved = False
+        self._load_token = 0
+        self._load_queue: queue.Queue[PackageLoadResult] = queue.Queue()
+        self._load_poll_scheduled = False
+        self._loading = False
+        self.loading_path: Path | None = None
+        self.empty_timeline_text = "No package loaded."
 
         self.status_var = tk.StringVar(value="No package loaded.")
         self.package_var = tk.StringVar(value="-")
@@ -314,7 +330,7 @@ class SessionTimelineAnalyzerApp:
         self.image_var = tk.StringVar(value="-")
         self._build_ui()
         if initial_path:
-            self.load_path(Path(initial_path))
+            self.root.after(0, lambda: self.load_path(Path(initial_path)))
         elif auto_prompt:
             self.root.after(150, self.choose_package_folder)
 
@@ -327,8 +343,10 @@ class SessionTimelineAnalyzerApp:
         toolbar = ttk.Frame(self.root, padding=10)
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(2, weight=1)
-        ttk.Button(toolbar, text="Open Folder", command=self.choose_package_folder).grid(row=0, column=0, sticky="w")
-        ttk.Button(toolbar, text="Open Zip", command=self.choose_package_zip).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.open_folder_button = ttk.Button(toolbar, text="Open Folder", command=self.choose_package_folder)
+        self.open_zip_button = ttk.Button(toolbar, text="Open Zip", command=self.choose_package_zip)
+        self.open_folder_button.grid(row=0, column=0, sticky="w")
+        self.open_zip_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(toolbar, textvariable=self.package_var, anchor="w").grid(row=0, column=2, sticky="ew", padx=(10, 0))
         ttk.Label(toolbar, textvariable=self.meta_var, anchor="e").grid(row=0, column=3, sticky="e", padx=(10, 0))
 
@@ -392,23 +410,89 @@ class SessionTimelineAnalyzerApp:
             self.load_path(Path(selected))
 
     def load_path(self, path: Path) -> None:
-        try:
-            if self.package is not None:
-                self.package.close()
-            self.package = load_session_package(path)
-            width = max(1, int(self.timeline.winfo_width() or 1000))
-            self.viewport = TimelineViewport(self.package.start_ns, self.package.end_ns, width)
-            self.selected_event = None
-            self.package_var.set(str(path))
-            self.meta_var.set(self._metadata_text())
-            self.status_var.set("Package loaded.")
-            self.populate_tree()
+        self._start_package_load(Path(path))
+
+    def _start_package_load(self, path: Path) -> None:
+        self._load_token += 1
+        token = self._load_token
+        self._loading = True
+        self.loading_path = path
+        self.status_var.set(f"Loading package: {path}")
+        self.image_var.set("-")
+        self.empty_timeline_text = "Loading package..."
+        self._set_open_controls_enabled(False)
+        if self.package is None:
             self.draw_timeline()
-            if self.package.events:
-                self.select_event(self.package.events[0])
+        worker = threading.Thread(target=self._background_load_package, args=(token, path), daemon=True)
+        worker.start()
+        self._schedule_load_poll()
+
+    def _background_load_package(self, token: int, path: Path) -> None:
+        try:
+            package = load_session_package(path)
         except Exception as exc:
+            self._load_queue.put(PackageLoadResult(token=token, path=path, error=exc))
+        else:
+            self._load_queue.put(PackageLoadResult(token=token, path=path, package=package))
+
+    def _schedule_load_poll(self) -> None:
+        if self._load_poll_scheduled:
+            return
+        self._load_poll_scheduled = True
+        self.root.after(50, self._poll_load_queue)
+
+    def _poll_load_queue(self) -> None:
+        self._load_poll_scheduled = False
+        try:
+            while True:
+                result = self._load_queue.get_nowait()
+                if result.token != self._load_token:
+                    if result.package is not None:
+                        result.package.close()
+                    continue
+                self._finish_package_load(result)
+                return
+        except queue.Empty:
+            pass
+        if self._loading:
+            self._schedule_load_poll()
+
+    def _finish_package_load(self, result: PackageLoadResult) -> None:
+        self._loading = False
+        self.loading_path = None
+        self._set_open_controls_enabled(True)
+        self.empty_timeline_text = "No package loaded."
+        if result.error is not None:
             self.status_var.set("Package load failed.")
-            messagebox.showerror("Package load failed", str(exc))
+            if self.package is None:
+                self.package_var.set("-")
+                self.meta_var.set("-")
+                self.draw_timeline()
+            messagebox.showerror("Package load failed", str(result.error))
+            return
+
+        assert result.package is not None
+        old_package = self.package
+        self.package = result.package
+        if old_package is not None:
+            old_package.close()
+        width = max(1, int(self.timeline.winfo_width() or 1000))
+        self.viewport = TimelineViewport(self.package.start_ns, self.package.end_ns, width)
+        self.selected_event = None
+        self.package_var.set(str(result.path))
+        self.meta_var.set(self._metadata_text())
+        self.status_var.set("Package loaded.")
+        self.populate_tree()
+        self.draw_timeline()
+        if self.package.events:
+            self.select_event(self.package.events[0])
+
+    def _set_open_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button_name in ("open_folder_button", "open_zip_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=state)
 
     def _metadata_text(self) -> str:
         assert self.package is not None
@@ -440,7 +524,7 @@ class SessionTimelineAnalyzerApp:
     def draw_timeline(self) -> None:
         self.timeline.delete("all")
         if self.package is None or self.viewport is None:
-            self.timeline.create_text(20, TIMELINE_HEIGHT // 2, text="No package loaded.", anchor="w", fill="#525252")
+            self.timeline.create_text(20, TIMELINE_HEIGHT // 2, text=self.empty_timeline_text, anchor="w", fill="#525252")
             return
         width = max(1, int(self.timeline.winfo_width() or self.viewport.width))
         self.viewport.width = width

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -85,6 +86,43 @@ def create_sample_package(path: Path) -> None:
                     archive.write(file_path, file_path.relative_to(root).as_posix())
 
 
+class FakeRoot:
+    def __init__(self):
+        self.after_calls = []
+
+    def after(self, delay_ms, callback, *args):
+        self.after_calls.append((delay_ms, callback, args))
+        return "after-id"
+
+
+class FakeVar:
+    def __init__(self):
+        self.value = None
+
+    def set(self, value):
+        self.value = value
+
+
+class FakeButton:
+    def __init__(self):
+        self.config = {}
+
+    def configure(self, **kwargs):
+        self.config.update(kwargs)
+
+
+class FakeTimeline:
+    def __init__(self):
+        self.items = []
+
+    def delete(self, *args):
+        self.items.append(("delete", args))
+
+    def create_text(self, *args, **kwargs):
+        self.items.append(("create_text", args, kwargs))
+        return len(self.items)
+
+
 class SessionTimelineAnalyzerTests(unittest.TestCase):
     def test_load_session_package_parses_manifest_events_and_frame_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +197,37 @@ class SessionTimelineAnalyzerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(analyzer.SessionPackageError, "events.jsonl"):
                 analyzer.load_session_package(package_path)
+
+    def test_load_path_starts_background_worker_without_blocking_ui_callback(self):
+        app = analyzer.SessionTimelineAnalyzerApp.__new__(analyzer.SessionTimelineAnalyzerApp)
+        app.root = FakeRoot()
+        app.package = None
+        app.status_var = FakeVar()
+        app.package_var = FakeVar()
+        app.meta_var = FakeVar()
+        app.image_var = FakeVar()
+        app.timeline = FakeTimeline()
+        app.open_folder_button = FakeButton()
+        app.open_zip_button = FakeButton()
+        app.empty_timeline_text = "No package loaded."
+        app._loading = False
+        app._load_token = 0
+        app._load_queue = __import__("queue").Queue()
+        app._load_poll_scheduled = False
+        app.loading_path = None
+
+        with patch.object(analyzer, "load_session_package") as loader:
+            with patch("threading.Thread") as thread_class:
+                app.load_path(Path("session_sample.zip"))
+
+        self.assertFalse(loader.called)
+        self.assertIn("Loading", app.status_var.value)
+        self.assertEqual(app.open_folder_button.config["state"], "disabled")
+        self.assertEqual(app.open_zip_button.config["state"], "disabled")
+        thread_class.assert_called_once()
+        self.assertTrue(thread_class.call_args.kwargs["daemon"])
+        thread_class.return_value.start.assert_called_once()
+        self.assertTrue(app.root.after_calls)
 
     def test_packaging_scripts_define_standalone_onefile_exe(self):
         repo_root = Path(__file__).resolve().parents[1]
