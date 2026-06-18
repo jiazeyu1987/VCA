@@ -15,66 +15,70 @@ def write_png(path: Path, color: tuple[int, int, int]) -> None:
     image.save(path, format="PNG")
 
 
+def create_sample_package_directory(root: Path) -> None:
+    write_png(root / "frames" / "frame_000001_seq_000000007_offline_capture.png", (20, 30, 40))
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "session_id": "sample",
+                "point_id": 123,
+                "frame_count": 1,
+                "online_event_count": 1,
+                "package_status": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    events = [
+        {
+            "schema_version": "1.0",
+            "session_id": "sample",
+            "event_type": "offline_start",
+            "epoch_ms": 1000,
+            "perf_counter_ns": 1_000_000,
+            "wall_time_iso": "2026-06-18T10:00:00.000",
+        },
+        {
+            "schema_version": "1.0",
+            "session_id": "sample",
+            "event_type": "offline_frame",
+            "epoch_ms": 1010,
+            "perf_counter_ns": 1_010_000,
+            "wall_time_iso": "2026-06-18T10:00:00.010",
+            "frame_id": "frame_000001",
+            "frame_seq": 7,
+            "path": "frames/frame_000001_seq_000000007_offline_capture.png",
+        },
+        {
+            "schema_version": "1.0",
+            "session_id": "sample",
+            "event_type": "online_request",
+            "epoch_ms": 1025,
+            "perf_counter_ns": 1_025_000,
+            "wall_time_iso": "2026-06-18T10:00:00.025",
+            "trace_id": "trace-1",
+            "server_duration_ms": 2.5,
+        },
+        {
+            "schema_version": "1.0",
+            "session_id": "sample",
+            "event_type": "offline_end",
+            "epoch_ms": 1100,
+            "perf_counter_ns": 1_100_000,
+            "wall_time_iso": "2026-06-18T10:00:00.100",
+        },
+    ]
+    (root / "events.jsonl").write_text(
+        "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+
 def create_sample_package(path: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        write_png(root / "frames" / "frame_000001_seq_000000007_offline_capture.png", (20, 30, 40))
-        (root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "session_id": "sample",
-                    "point_id": 123,
-                    "frame_count": 1,
-                    "online_event_count": 1,
-                    "package_status": "completed",
-                }
-            ),
-            encoding="utf-8",
-        )
-        events = [
-            {
-                "schema_version": "1.0",
-                "session_id": "sample",
-                "event_type": "offline_start",
-                "epoch_ms": 1000,
-                "perf_counter_ns": 1_000_000,
-                "wall_time_iso": "2026-06-18T10:00:00.000",
-            },
-            {
-                "schema_version": "1.0",
-                "session_id": "sample",
-                "event_type": "offline_frame",
-                "epoch_ms": 1010,
-                "perf_counter_ns": 1_010_000,
-                "wall_time_iso": "2026-06-18T10:00:00.010",
-                "frame_id": "frame_000001",
-                "frame_seq": 7,
-                "path": "frames/frame_000001_seq_000000007_offline_capture.png",
-            },
-            {
-                "schema_version": "1.0",
-                "session_id": "sample",
-                "event_type": "online_request",
-                "epoch_ms": 1025,
-                "perf_counter_ns": 1_025_000,
-                "wall_time_iso": "2026-06-18T10:00:00.025",
-                "trace_id": "trace-1",
-                "server_duration_ms": 2.5,
-            },
-            {
-                "schema_version": "1.0",
-                "session_id": "sample",
-                "event_type": "offline_end",
-                "epoch_ms": 1100,
-                "perf_counter_ns": 1_100_000,
-                "wall_time_iso": "2026-06-18T10:00:00.100",
-            },
-        ]
-        (root / "events.jsonl").write_text(
-            "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
-            encoding="utf-8",
-        )
+        create_sample_package_directory(root)
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for file_path in root.rglob("*"):
                 if file_path.is_file():
@@ -118,6 +122,21 @@ class SessionTimelineAnalyzerTests(unittest.TestCase):
             finally:
                 package.close()
 
+    def test_load_session_package_accepts_extracted_package_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp) / "session_sample"
+            package_dir.mkdir()
+            create_sample_package_directory(package_dir)
+
+            package = analyzer.load_session_package(package_dir)
+
+            try:
+                self.assertEqual(package.manifest["session_id"], "sample")
+                self.assertEqual(package.package_path, package_dir)
+                self.assertEqual(package.open_image(package.events[1]).size, (4, 3))
+            finally:
+                package.close()
+
     def test_timeline_viewport_pan_zoom_and_hit_testing(self):
         viewport = analyzer.TimelineViewport(start_ns=1_000_000, end_ns=1_100_000, width=1000)
 
@@ -140,6 +159,26 @@ class SessionTimelineAnalyzerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(analyzer.SessionPackageError, "events.jsonl"):
                 analyzer.load_session_package(package_path)
+
+    def test_packaging_scripts_define_standalone_onefile_exe(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        script = repo_root / "tools" / "package_session_timeline_analyzer.ps1"
+        runner = repo_root / "package_session_timeline_analyzer.bat"
+
+        self.assertTrue(script.is_file(), f"missing packaging script: {script}")
+        self.assertTrue(runner.is_file(), f"missing packaging runner: {runner}")
+
+        script_text = script.read_text(encoding="utf-8")
+        runner_text = runner.read_text(encoding="utf-8")
+        self.assertIn('"-m", "PyInstaller"', script_text)
+        self.assertIn('"--onefile"', script_text)
+        self.assertIn('"--windowed"', script_text)
+        self.assertIn('$appName = "session_timeline_analyzer"', script_text)
+        self.assertIn("session_timeline_analyzer.py", script_text)
+        self.assertIn("session_timeline_analyzer.exe", script_text)
+        self.assertIn('"tcl86t.dll"', script_text)
+        self.assertIn('"tk86t.dll"', script_text)
+        self.assertIn("tools\\package_session_timeline_analyzer.ps1", runner_text)
 
 
 if __name__ == "__main__":

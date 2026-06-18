@@ -297,7 +297,7 @@ def parse_events(text: str) -> list[TimelineEvent]:
 
 
 class SessionTimelineAnalyzerApp:
-    def __init__(self, root: tk.Tk, initial_path: str | None = None):
+    def __init__(self, root: tk.Tk, initial_path: str | None = None, auto_prompt: bool = True):
         self.root = root
         self.root.title(APP_TITLE)
         self.package: SessionPackage | None = None
@@ -315,6 +315,8 @@ class SessionTimelineAnalyzerApp:
         self._build_ui()
         if initial_path:
             self.load_path(Path(initial_path))
+        elif auto_prompt:
+            self.root.after(150, self.choose_package_folder)
 
     def _build_ui(self) -> None:
         self.root.geometry("1180x760")
@@ -324,10 +326,11 @@ class SessionTimelineAnalyzerApp:
 
         toolbar = ttk.Frame(self.root, padding=10)
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(1, weight=1)
-        ttk.Button(toolbar, text="Open Package", command=self.choose_package).grid(row=0, column=0, sticky="w")
-        ttk.Label(toolbar, textvariable=self.package_var, anchor="w").grid(row=0, column=1, sticky="ew", padx=(10, 0))
-        ttk.Label(toolbar, textvariable=self.meta_var, anchor="e").grid(row=0, column=2, sticky="e", padx=(10, 0))
+        toolbar.columnconfigure(2, weight=1)
+        ttk.Button(toolbar, text="Open Folder", command=self.choose_package_folder).grid(row=0, column=0, sticky="w")
+        ttk.Button(toolbar, text="Open Zip", command=self.choose_package_zip).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(toolbar, textvariable=self.package_var, anchor="w").grid(row=0, column=2, sticky="ew", padx=(10, 0))
+        ttk.Label(toolbar, textvariable=self.meta_var, anchor="e").grid(row=0, column=3, sticky="e", padx=(10, 0))
 
         main = ttk.PanedWindow(self.root, orient="horizontal")
         main.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
@@ -373,10 +376,18 @@ class SessionTimelineAnalyzerApp:
         self.root.bind("<minus>", lambda _event: self.zoom_keyboard(0.75))
 
     def choose_package(self) -> None:
+        self.choose_package_zip()
+
+    def choose_package_zip(self) -> None:
         selected = filedialog.askopenfilename(
             title="Open session package",
             filetypes=(("Session packages", "session_*.zip"), ("Zip files", "*.zip"), ("All files", "*.*")),
         )
+        if selected:
+            self.load_path(Path(selected))
+
+    def choose_package_folder(self) -> None:
+        selected = filedialog.askdirectory(title="Open extracted session package folder")
         if selected:
             self.load_path(Path(selected))
 
