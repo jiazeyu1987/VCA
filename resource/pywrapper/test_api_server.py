@@ -432,6 +432,7 @@ class ApiServerTests(unittest.TestCase):
                 },
                 "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
                 "offline_stop_wait_timeout_seconds": 8.0,
+                "provider_ultrasound_depth_cache_path": "D:/software_data/custom_depth_cache.json",
                 "focus_guides": {"angle_degrees": 88.0, "line_width": 5, "y_offset_mm": 2.5},
             },
             self.make_null_logger("test_parse_offline_config_reads_roi_and_debug_settings"),
@@ -457,6 +458,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertTrue(config.debug_save_enabled)
         self.assertEqual(config.debug_save_dir, "D:/software_data/tmp")
         self.assertEqual(config.stop_wait_timeout_seconds, 8.0)
+        self.assertEqual(config.provider_ultrasound_depth_cache_path, "D:/software_data/custom_depth_cache.json")
         self.assertTrue(config.screenshot_test_enabled)
         self.assertEqual(config.focus_guide_angle_degrees, 88.0)
         self.assertEqual(config.focus_guide_line_width, 5)
@@ -478,6 +480,10 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertEqual(config.focus_y_offset_mm, 1.0)
         self.assertEqual(config.frame_history_offset, 3)
+        self.assertEqual(
+            config.provider_ultrasound_depth_cache_path,
+            api_server.DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH,
+        )
 
     def test_parse_offline_config_reads_frame_history_offset(self):
         config = api_server.parse_offline_config(
@@ -737,6 +743,158 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(start, {"success": True, "info": "offline_started", "point_id": 123})
         self.assertEqual(stop["roi2_color"], "red")
         self.assertIsNone(stop["focus_anchor"])
+
+    def test_provider_fetch_persists_valid_raw_ultrasound_depth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "provider_ultrasound_depth_cache.json"
+            cache = api_server.UltrasoundDepthCache(
+                cache_path,
+                self.make_null_logger("test_provider_fetch_persists_valid_raw_ultrasound_depth"),
+            )
+            provider = self.make_provider_for_reconnect_tests([make_state()])
+            provider._ultrasound_depth_cache = cache
+            self.configure_provider_request_payload(
+                provider,
+                json.dumps({"depth": "40", "focus_depth": "7.5"}),
+            )
+
+            data = provider.fetch(timeout_s=0.1)
+
+            self.assertEqual(data["depth"], "40")
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["ultrasound_depth_mm"], 40.0)
+            self.assertEqual(payload["source_field"], "depth")
+
+    def test_online_missing_depth_does_not_use_cached_ultrasound_depth_response(self):
+        response = api_server.handle_request(
+            "ONLINE;31415;{}",
+            provider_fetcher=lambda: {"isLive": True, "focus_depth": "7.5"},
+            logger=self.make_null_logger("test_online_missing_depth_does_not_use_cached_ultrasound_depth_response"),
+        )
+
+        payload = json.loads(response)
+        self.assertIsNone(payload["Depth"])
+        self.assertEqual(payload["SkinDepth"], 7.5)
+
+    def test_offline_uses_cached_ultrasound_depth_when_provider_depth_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "provider_ultrasound_depth_cache.json"
+            cache_path.write_text(
+                json.dumps({"ultrasound_depth_mm": 1000.0, "source_field": "depth"}),
+                encoding="utf-8",
+            )
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "focus_depth": "7.5"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    image_output_dir=None,
+                    provider_ultrasound_depth_cache_path=str(cache_path),
+                ),
+                logger=self.make_null_logger("test_offline_uses_cached_ultrasound_depth_when_provider_depth_missing"),
+            )
+
+            start = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+
+            self.assertEqual(start, {"success": True, "info": "offline_started", "point_id": 123})
+            self.assertEqual(stop["success"], True)
+            self.assertEqual(stop["info"], "offline_stop_completed")
+            self.assertEqual(stop["roi2_color"], "green")
+            self.assertEqual(stop["roi2_rect"], [8, 7, 12, 13])
+            session = manager._orphans[-1]
+            self.assertEqual(session.ultrasound_depth_mm, 1000.0)
+            self.assertEqual(session.meta["ultrasound_depth_source"], "cache_file")
+            self.assertIsNone(session.meta["provider_ultrasound_depth"])
+
+    def test_offline_missing_raw_depth_does_not_use_focus_depth_as_ultrasound_depth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "provider_ultrasound_depth_cache.json"
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "focus_depth": "7.5"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    stop_wait_timeout_seconds=1.0,
+                    image_output_dir=None,
+                    provider_ultrasound_depth_cache_path=str(cache_path),
+                ),
+                logger=self.make_null_logger("test_offline_missing_raw_depth_does_not_use_focus_depth_as_ultrasound_depth"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+
+            self.assertEqual(stop["success"], False)
+            self.assertEqual(stop["info"], "error_in_detect")
+            self.assertIn("provider ultrasound depth", stop["error"])
+            self.assertNotEqual(stop["info"], "offline_stop_timeout")
+            self.assertTrue(manager._orphans[-1].finished_event.is_set())
+
+    def test_offline_invalid_ultrasound_depth_cache_returns_error_without_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "provider_ultrasound_depth_cache.json"
+            cache_path.write_text(
+                json.dumps({"ultrasound_depth_mm": 0, "source_field": "depth"}),
+                encoding="utf-8",
+            )
+            frame = api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0)
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(10, 10)"},
+                frame_fetcher=self.SequenceFrameSource([frame]),
+                config=api_server.OfflineConfig(
+                    stop_wait_timeout_seconds=1.0,
+                    image_output_dir=None,
+                    provider_ultrasound_depth_cache_path=str(cache_path),
+                ),
+                logger=self.make_null_logger("test_offline_invalid_ultrasound_depth_cache_returns_error_without_timeout"),
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+            time.sleep(0.05)
+            stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+
+            self.assertEqual(stop["success"], False)
+            self.assertEqual(stop["info"], "error_in_detect")
+            self.assertIn("provider ultrasound depth", stop["error"])
+            self.assertTrue(manager._orphans[-1].finished_event.is_set())
+
+    def test_offline_provider_fetch_failure_returns_error_without_thread_timeout(self):
+        def provider_failure():
+            raise TimeoutError("RequestContentProvider timed out after 0.500s")
+
+        frame = api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0)
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=provider_failure,
+            frame_fetcher=self.SequenceFrameSource([frame]),
+            config=api_server.OfflineConfig(
+                stop_wait_timeout_seconds=1.0,
+                image_output_dir=None,
+            ),
+            logger=self.make_null_logger("test_offline_provider_fetch_failure_returns_error_without_thread_timeout"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+        time.sleep(0.05)
+        stop = manager.handle('{"point_id": 123, "time_out": 100, "is_save": true}')
+
+        self.assertEqual(stop["success"], False)
+        self.assertEqual(stop["info"], "error_in_detect")
+        self.assertIn("RequestContentProvider timed out", stop["error"])
+        self.assertTrue(manager._orphans[-1].finished_event.is_set())
 
     def test_offline_two_signal_session_returns_green_roi2_result(self):
         frames = self.SequenceFrameSource([
@@ -1860,7 +2018,7 @@ class ApiServerTests(unittest.TestCase):
             stop_event=threading.Event(),
         )
         session.focus_anchor = (80, 80)
-        session.focus_depth_mm = 20.0
+        session.ultrasound_depth_mm = 20.0
         frame = np.zeros((200, 200, 3), dtype=np.uint8)
 
         actual = api_server.render_frame_with_focus_guides(frame, session, api_server.OfflineConfig())
@@ -1878,7 +2036,7 @@ class ApiServerTests(unittest.TestCase):
             stop_event=threading.Event(),
         )
         session.focus_anchor = (100, 100)
-        session.focus_depth_mm = 100.0
+        session.ultrasound_depth_mm = 100.0
         session.roi2_rect = api_server.compute_roi_region(
             (200, 200),
             session.focus_anchor,
@@ -1905,7 +2063,7 @@ class ApiServerTests(unittest.TestCase):
         session.focus_anchor = (80, 80)
         frame = np.zeros((200, 200, 3), dtype=np.uint8)
 
-        with self.assertRaisesRegex(ValueError, "provider depth"):
+        with self.assertRaisesRegex(ValueError, "provider ultrasound depth"):
             api_server.render_frame_with_focus_guides(frame, session, api_server.OfflineConfig())
 
     def test_positive_diff_image_ignores_alpha_channel_for_visible_png(self):
@@ -2718,6 +2876,7 @@ class ApiServerTests(unittest.TestCase):
         provider._pending_provider_event = None
         provider._pending_provider_payload = None
         provider._pending_provider_error = None
+        provider._ultrasound_depth_cache = None
         engine = Mock()
         engine.get_latest_state.side_effect = states
         provider._engine = engine

@@ -61,6 +61,7 @@ GUIDE_LINE_COLOR = (0, 255, 0)
 GUIDE_LINE_WIDTH = 3
 GUIDE_LINE_ANGLE_DEGREES = 100.0
 FOCUS_Y_OFFSET_MM = 1.0
+DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH = "D:/software_data/provider_ultrasound_depth_cache.json"
 ROI4_BOTTOM_REGION_RATIO = 0.3
 ROI4_FALLBACK_AFTER_METHODS = {
     "roi1_boundary_after2_fallback_last",
@@ -131,6 +132,7 @@ class OfflineConfig:
     image_output_dir: Optional[str] = None
     db_root_dir: Optional[str] = None
     result_flag_path: Optional[str] = None
+    provider_ultrasound_depth_cache_path: str = DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH
     focus_guide_angle_degrees: float = GUIDE_LINE_ANGLE_DEGREES
     focus_guide_line_width: int = GUIDE_LINE_WIDTH
     focus_y_offset_mm: float = FOCUS_Y_OFFSET_MM
@@ -180,7 +182,8 @@ class OfflineSession:
     after_name: str = ""
     after_method: Optional[str] = None
     focus_anchor: Optional[Tuple[int, int]] = None
-    focus_depth_mm: Optional[float] = None
+    ultrasound_depth_mm: Optional[float] = None
+    ultrasound_depth_source: Optional[str] = None
     roi2_rect: Optional[Tuple[int, int, int, int]] = None
     roi3_rect: Optional[Tuple[int, int, int, int]] = None
     roi4_rect: Optional[Tuple[int, int, int, int]] = None
@@ -431,7 +434,7 @@ def parse_focus_point(value) -> Optional[Tuple[int, int]]:
         return None
 
 
-def parse_focus_depth_mm(value) -> Optional[float]:
+def parse_ultrasound_depth_mm(value) -> Optional[float]:
     if value in (None, ""):
         return None
     try:
@@ -441,6 +444,82 @@ def parse_focus_depth_mm(value) -> Optional[float]:
     if depth_mm <= 0.0:
         return None
     return depth_mm
+
+
+class UltrasoundDepthCache:
+    def __init__(self, path, logger: Optional[logging.Logger] = None):
+        self._path = Path(path)
+        self._logger = logger or logging.getLogger("pywrapper_api_server")
+        self._lock = threading.Lock()
+        self._cached_ultrasound_depth_mm: Optional[float] = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def store_provider_depth(self, raw_depth) -> Optional[float]:
+        ultrasound_depth_mm = parse_ultrasound_depth_mm(raw_depth)
+        if ultrasound_depth_mm is None:
+            return None
+        payload = {
+            "ultrasound_depth_mm": float(ultrasound_depth_mm),
+            "source_field": "depth",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._path.with_name(self._path.name + ".tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(str(tmp_path), str(self._path))
+        except Exception:
+            self._logger.exception(
+                "failed to write provider ultrasound depth cache: path=%s depth=%s",
+                self._path,
+                ultrasound_depth_mm,
+            )
+            return ultrasound_depth_mm
+        with self._lock:
+            self._cached_ultrasound_depth_mm = ultrasound_depth_mm
+        self._logger.info(
+            "provider ultrasound depth cache updated: path=%s ultrasound_depth_mm=%s",
+            self._path,
+            ultrasound_depth_mm,
+        )
+        return ultrasound_depth_mm
+
+    def load_cached_depth(self) -> Optional[float]:
+        with self._lock:
+            if self._cached_ultrasound_depth_mm is not None:
+                return self._cached_ultrasound_depth_mm
+        try:
+            text = self._path.read_text(encoding="utf-8")
+            payload = json.loads(text)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            self._logger.exception("failed to read provider ultrasound depth cache: path=%s", self._path)
+            return None
+        if not isinstance(payload, dict):
+            self._logger.error("provider ultrasound depth cache must be a JSON object: path=%s", self._path)
+            return None
+        if payload.get("source_field") != "depth":
+            self._logger.error(
+                "provider ultrasound depth cache source_field must be depth: path=%s source_field=%r",
+                self._path,
+                payload.get("source_field"),
+            )
+            return None
+        ultrasound_depth_mm = parse_ultrasound_depth_mm(payload.get("ultrasound_depth_mm"))
+        if ultrasound_depth_mm is None:
+            self._logger.error(
+                "provider ultrasound depth cache has invalid ultrasound_depth_mm: path=%s value=%r",
+                self._path,
+                payload.get("ultrasound_depth_mm"),
+            )
+            return None
+        with self._lock:
+            self._cached_ultrasound_depth_mm = ultrasound_depth_mm
+        return ultrasound_depth_mm
 
 
 def validate_focus_y_offset_mm(value) -> float:
@@ -755,18 +834,18 @@ def resolve_focus_overlay_anchor(
     offset_mm = validate_focus_y_offset_mm(config.focus_y_offset_mm)
     if offset_mm == 0.0:
         return x, y
-    depth_mm = session.focus_depth_mm
-    if depth_mm is None or depth_mm <= 0.0:
-        raise ValueError("provider depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
+    ultrasound_depth_mm = session.ultrasound_depth_mm
+    if ultrasound_depth_mm is None or ultrasound_depth_mm <= 0.0:
+        raise ValueError("provider ultrasound depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
     width, height = image_size
-    offset_px = int(round(offset_mm * float(height) / float(depth_mm)))
+    offset_px = int(round(offset_mm * float(height) / float(ultrasound_depth_mm)))
     overlay_anchor = (x, y + offset_px)
     try:
         return validate_focus_anchor(image_size, overlay_anchor)
     except ValueError as exc:
         raise ValueError(
             "focus overlay outside image bounds "
-            f"focus={session.focus_anchor} offset_mm={offset_mm} depth_mm={depth_mm} "
+            f"focus={session.focus_anchor} offset_mm={offset_mm} ultrasound_depth_mm={ultrasound_depth_mm} "
             f"offset_px={offset_px} size={(width, height)}"
         ) from exc
 
@@ -774,24 +853,24 @@ def resolve_focus_overlay_anchor(
 def resolve_offset_focus_anchor(
     image_size: Tuple[int, int],
     anchor: Tuple[int, int],
-    focus_depth_mm: Optional[float],
+    ultrasound_depth_mm: Optional[float],
     config: OfflineConfig,
 ) -> Tuple[int, int]:
     x, y = validate_focus_anchor(image_size, anchor)
     offset_mm = validate_focus_y_offset_mm(config.focus_y_offset_mm)
     if offset_mm == 0.0:
         return x, y
-    if focus_depth_mm is None or focus_depth_mm <= 0.0:
-        raise ValueError("provider depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
+    if ultrasound_depth_mm is None or ultrasound_depth_mm <= 0.0:
+        raise ValueError("provider ultrasound depth is required and must be > 0 when focus_guides.y_offset_mm > 0")
     width, height = image_size
-    offset_px = int(round(offset_mm * float(height) / float(focus_depth_mm)))
+    offset_px = int(round(offset_mm * float(height) / float(ultrasound_depth_mm)))
     offset_anchor = (x, y + offset_px)
     try:
         return validate_focus_anchor(image_size, offset_anchor)
     except ValueError as exc:
         raise ValueError(
             "focus offset ROI anchor outside image bounds "
-            f"focus={anchor} offset_mm={offset_mm} depth_mm={focus_depth_mm} "
+            f"focus={anchor} offset_mm={offset_mm} ultrasound_depth_mm={ultrasound_depth_mm} "
             f"offset_px={offset_px} size={(width, height)}"
         ) from exc
 
@@ -1220,6 +1299,10 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     image_output_dir = settings.get("image_output_dir", "D:/software_data/imgs")
     db_root_dir = settings.get("db_root_dir", "D:/software_data")
     result_flag_path = settings.get("result_flag_path", "D:/software_data/result.txt")
+    provider_ultrasound_depth_cache_path = settings.get(
+        "provider_ultrasound_depth_cache_path",
+        DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH,
+    )
 
     config = OfflineConfig(
         screenshot_test_enabled=bool(screenshot_cfg.get("enabled", False)),
@@ -1244,6 +1327,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         image_output_dir=str(image_output_dir) if image_output_dir else None,
         db_root_dir=str(db_root_dir) if db_root_dir else None,
         result_flag_path=str(result_flag_path) if result_flag_path else None,
+        provider_ultrasound_depth_cache_path=str(provider_ultrasound_depth_cache_path),
         focus_guide_angle_degrees=focus_guide_angle_degrees,
         focus_guide_line_width=focus_guide_line_width,
         focus_y_offset_mm=focus_y_offset_mm,
@@ -1252,7 +1336,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
     logger.info(
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
         "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s roi4_bottom_region_ratio=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
-        "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s "
+        "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s provider_ultrasound_depth_cache_path=%s "
         "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s frame_history_offset=%s",
         config.screenshot_test_enabled,
         config.screenshot_capture_bbox,
@@ -1271,6 +1355,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.image_output_dir,
         config.db_root_dir,
         config.result_flag_path,
+        config.provider_ultrasound_depth_cache_path,
         config.focus_guide_angle_degrees,
         config.focus_guide_line_width,
         config.focus_y_offset_mm,
@@ -1427,9 +1512,15 @@ class MobileCommEngine:
 
 
 class PyMobileCommProvider:
-    def __init__(self, logger: Optional[logging.Logger] = None, frame_history_offset: int = 3):
+    def __init__(
+        self,
+        logger: Optional[logging.Logger] = None,
+        frame_history_offset: int = 3,
+        ultrasound_depth_cache: Optional[UltrasoundDepthCache] = None,
+    ):
         self._logger = logger or logging.getLogger("pywrapper_api_server")
         self._frame_history_offset = max(0, int(frame_history_offset))
+        self._ultrasound_depth_cache = ultrasound_depth_cache
         self._logger.info("initializing PyMobileComm provider")
         module = import_mobile_comm()
         self._logger.info("PyMobileComm module imported from: %s", getattr(module, "__file__", "<unknown>"))
@@ -1512,12 +1603,19 @@ class PyMobileCommProvider:
 
             self._logger.info("RequestContentProvider returned type=%s", type(data).__name__)
             self._logger.info("RequestContentProvider returned data: %s", safe_json_text(data))
+            self._cache_provider_ultrasound_depth(data)
             return data
         finally:
             with self._request_state_lock:
                 self._pending_provider_event = None
                 self._pending_provider_payload = None
                 self._pending_provider_error = None
+
+    def _cache_provider_ultrasound_depth(self, data: dict) -> None:
+        cache = getattr(self, "_ultrasound_depth_cache", None)
+        if cache is None or not isinstance(data, dict):
+            return
+        cache.store_provider_depth(data.get("depth"))
 
     def fetch(self, timeout_s: float = ONLINE_PROVIDER_TIMEOUT_SECONDS) -> dict:
         with self._lock:
@@ -1625,11 +1723,16 @@ class OfflineSessionManager:
         logger: Optional[logging.Logger] = None,
         debug_saver: Optional[DebugFrameSaver] = None,
         screenshot_frame_fetcher: Optional[Callable[[], Optional[FrameSnapshot]]] = None,
+        ultrasound_depth_cache: Optional[UltrasoundDepthCache] = None,
     ):
         self._provider_fetcher = provider_fetcher
         self._config = config
         self._logger = logger or logging.getLogger("pywrapper_api_server")
         self._debug_saver = debug_saver or DebugFrameSaver()
+        self._ultrasound_depth_cache = ultrasound_depth_cache or UltrasoundDepthCache(
+            config.provider_ultrasound_depth_cache_path,
+            self._logger,
+        )
         self._capture_source = "screenshot" if bool(config.screenshot_test_enabled) else "image_matrix"
         if bool(config.screenshot_test_enabled):
             self._frame_fetcher = screenshot_frame_fetcher or ScreenCaptureFrameSource(
@@ -1667,7 +1770,8 @@ class OfflineSessionManager:
             "before_seq": int(session.before_seq) if session.before_seq is not None else None,
             "before_ts": round(float(session.before_ts), 6) if session.before_ts is not None else None,
             "focus_anchor": [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None,
-            "focus_depth_mm": round(float(session.focus_depth_mm), 6) if session.focus_depth_mm is not None else None,
+            "ultrasound_depth_mm": round(float(session.ultrasound_depth_mm), 6) if session.ultrasound_depth_mm is not None else None,
+            "ultrasound_depth_source": session.ultrasound_depth_source,
             "roi2_rect": [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None,
             "roi3_rect": [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None,
             "before_mean": round(float(session.before_mean), 6) if session.before_mean is not None else None,
@@ -2105,8 +2209,16 @@ class OfflineSessionManager:
     def _initialize_focus_and_rois(self, session: OfflineSession, before_frame: np.ndarray) -> None:
         raw_provider = self._provider_fetcher()
         focus_point = raw_provider.get("focus_point") if isinstance(raw_provider, dict) else None
-        provider_depth = raw_provider.get("depth") if isinstance(raw_provider, dict) else None
-        focus_depth_mm = parse_focus_depth_mm(provider_depth)
+        provider_ultrasound_depth = raw_provider.get("depth") if isinstance(raw_provider, dict) else None
+        ultrasound_depth_mm = parse_ultrasound_depth_mm(provider_ultrasound_depth)
+        ultrasound_depth_source = None
+        if ultrasound_depth_mm is not None:
+            ultrasound_depth_source = "provider"
+        else:
+            cached_ultrasound_depth_mm = self._ultrasound_depth_cache.load_cached_depth()
+            if cached_ultrasound_depth_mm is not None:
+                ultrasound_depth_mm = cached_ultrasound_depth_mm
+                ultrasound_depth_source = "cache_file"
         anchor = parse_focus_point(focus_point) if focus_point is not None else None
         roi2_rect = None
         roi3_rect = None
@@ -2114,7 +2226,7 @@ class OfflineSessionManager:
         used_cache = False
         if anchor is not None:
             height, width = before_frame.shape[:2]
-            offset_anchor = resolve_offset_focus_anchor((width, height), anchor, focus_depth_mm, self._config)
+            offset_anchor = resolve_offset_focus_anchor((width, height), anchor, ultrasound_depth_mm, self._config)
             roi2_rect = compute_roi_region((width, height), offset_anchor, self._config.roi2_extension_params)
             roi3_rect = compute_roi_region((width, height), offset_anchor, self._config.roi3_extension_params)
         if anchor is None or roi2_rect is None or roi3_rect is None:
@@ -2124,20 +2236,23 @@ class OfflineSessionManager:
                 used_cache = True
         if anchor is not None and roi2_rect is not None and roi3_rect is not None:
             session.focus_anchor = anchor
-            session.focus_depth_mm = focus_depth_mm
+            session.ultrasound_depth_mm = ultrasound_depth_mm
+            session.ultrasound_depth_source = ultrasound_depth_source
             session.roi2_rect = roi2_rect
             session.roi3_rect = roi3_rect
             self._set_cached_roi_state(anchor, roi2_rect, roi3_rect)
         session.meta["provider_focus_point"] = focus_point
-        session.meta["provider_depth"] = provider_depth
-        session.meta["focus_depth_mm"] = focus_depth_mm
+        session.meta["provider_ultrasound_depth"] = provider_ultrasound_depth
+        session.meta["ultrasound_depth_mm"] = ultrasound_depth_mm
+        session.meta["ultrasound_depth_source"] = ultrasound_depth_source
         self._offline_diag(
             "focus_roi_initialized",
             point_id=session.point_id,
             capture_source="image_matrix",
             provider_focus_point=focus_point,
-            provider_depth=provider_depth,
-            focus_depth_mm=focus_depth_mm,
+            provider_ultrasound_depth=provider_ultrasound_depth,
+            ultrasound_depth_mm=ultrasound_depth_mm,
+            ultrasound_depth_source=ultrasound_depth_source,
             parsed_anchor=[int(anchor[0]), int(anchor[1])] if anchor is not None else None,
             offset_anchor=[int(offset_anchor[0]), int(offset_anchor[1])] if offset_anchor is not None else None,
             used_cache=bool(used_cache),
@@ -2517,7 +2632,8 @@ class OfflineSessionManager:
         self._flush_buffered_frames(session)
         meta = dict(session.meta)
         meta["focus_anchor"] = [int(session.focus_anchor[0]), int(session.focus_anchor[1])] if session.focus_anchor is not None else None
-        meta["focus_depth_mm"] = round(float(session.focus_depth_mm), 6) if session.focus_depth_mm is not None else None
+        meta["ultrasound_depth_mm"] = round(float(session.ultrasound_depth_mm), 6) if session.ultrasound_depth_mm is not None else None
+        meta["ultrasound_depth_source"] = session.ultrasound_depth_source
         meta["focus_y_offset_mm"] = round(float(self._config.focus_y_offset_mm), 6)
         focus_overlay_anchor = None
         if session.before is not None:
@@ -3035,11 +3151,16 @@ class OfflineSessionManager:
             )
             try:
                 session.final_roi2_color = "red"
-                if session.roi2_rect is None and session.before is not None:
+                if pending_error_response is None and session.roi2_rect is None and session.before is not None:
                     self._initialize_focus_and_rois(session, session.before)
                     if session.roi2_rect is not None and session.before_mean is None:
                         session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
-                if self._config.peak_detect_enabled and session.roi2_rect is not None and session.before is not None and session.after is not None:
+                if (
+                    self._config.peak_detect_enabled
+                    and session.roi2_rect is not None
+                    and session.before is not None
+                    and session.after is not None
+                ):
                     if session.before_mean is None:
                         session.before_mean = roi_gray_mean(session.before, session.roi2_rect)
                     session.after_mean = roi_gray_mean(session.after, session.roi2_rect)
@@ -3050,12 +3171,19 @@ class OfflineSessionManager:
                     "roi2_metrics",
                     roi2_metrics_start,
                     success=True,
+                    skipped_due_to_pending_error=bool(pending_error_response is not None),
                     roi2_color=session.final_roi2_color,
                     roi2_diff=round(float(session.roi2_diff), 6) if session.roi2_diff is not None else None,
                 )
             except Exception as exc:
                 self._finalization_stage_end(session, "roi2_metrics", roi2_metrics_start, success=False, error=str(exc))
-                raise
+                self._logger.exception("OFFLINE roi2 metrics failed: point_id=%s", session.point_id)
+                pending_error_response = {
+                    "success": False,
+                    "info": "error_in_detect",
+                    "point_id": session.point_id,
+                    "error": str(exc),
+                }
 
             self._offline_diag(
                 "stop_decision",
@@ -3657,12 +3785,21 @@ def main(argv=None) -> int:
     logger = build_logger()
     log_process_environment(logger)
     offline_config = load_offline_config(logger)
-    provider = PyMobileCommProvider(logger, frame_history_offset=offline_config.frame_history_offset)
+    ultrasound_depth_cache = UltrasoundDepthCache(
+        offline_config.provider_ultrasound_depth_cache_path,
+        logger,
+    )
+    provider = PyMobileCommProvider(
+        logger,
+        frame_history_offset=offline_config.frame_history_offset,
+        ultrasound_depth_cache=ultrasound_depth_cache,
+    )
     offline_manager = OfflineSessionManager(
         provider_fetcher=provider.fetch,
         frame_fetcher=provider.get_latest_frame,
         config=offline_config,
         logger=logger,
+        ultrasound_depth_cache=ultrasound_depth_cache,
     )
     try:
         ApiServer(provider, logger, offline_manager).serve_forever(args.host, args.port)
