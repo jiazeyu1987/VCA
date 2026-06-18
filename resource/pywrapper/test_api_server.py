@@ -8,11 +8,66 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 
 import numpy as np
 
 import api_server
+import session_recorder
+
+
+class FakeClientSocket:
+    def __init__(self):
+        self.sent = b""
+
+    def sendall(self, data):
+        self.sent += data
+
+
+class FakeSessionRecorder:
+    def __init__(self, active=True, package_path="D:/software_data/session_packages/session_test.zip"):
+        self.calls = []
+        self.active = active
+        self.package_path = Path(package_path)
+
+    def start_session(self, **kwargs):
+        self.active = True
+        self.calls.append(("start_session", kwargs))
+
+    def record_frame(self, image, **kwargs):
+        self.calls.append(("record_frame", kwargs))
+
+    def mark_offline_stop_requested(self, **kwargs):
+        self.calls.append(("mark_offline_stop_requested", kwargs))
+
+    def record_online_request(self, **kwargs):
+        self.calls.append(("record_online_request", kwargs))
+
+    def record_offline_result(self, result_summary):
+        self.calls.append(("record_offline_result", result_summary))
+
+    def finish_session(self):
+        self.calls.append(("finish_session", {}))
+        self.active = False
+        return self.package_path
+
+    def is_active(self):
+        return bool(self.active)
+
+
+class FakeOnlineProvider:
+    def __init__(self):
+        self.latest_frame = api_server.FrameSnapshot(np.zeros((2, 2, 3), dtype=np.uint8), 99, 123.456)
+
+    def fetch_online(self, trace_id=None):
+        return {"isLive": True, "mode": 2, "depth": "40", "focus_depth": "6.5"}
+
+    def fetch(self):
+        return {"isLive": True, "mode": 2, "depth": "40", "focus_depth": "6.5"}
+
+    def get_latest_frame(self):
+        return self.latest_frame
 
 
 def make_state(
@@ -536,6 +591,26 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertIsNone(config.roi4_rect)
         self.assertEqual(config.roi4_bottom_region_ratio, 0.4)
+
+    def test_parse_session_recorder_config_reads_required_recording_settings(self):
+        config = api_server.parse_session_recorder_config(
+            {
+                "session_recording": {
+                    "enabled": True,
+                    "output_dir": "D:/software_data/session_packages",
+                    "frame_format": "png",
+                    "max_writer_queue": 256,
+                    "include_online_response": True,
+                    "include_trace_json": True,
+                    "package_on_finish": True,
+                }
+            }
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.output_dir, "D:/software_data/session_packages")
+        self.assertEqual(config.frame_format, "png")
+        self.assertEqual(config.max_writer_queue, 256)
 
     def test_resolve_roi4_rect_uses_bottom_percent_of_current_image(self):
         image = np.zeros((512, 542, 3), dtype=np.uint8)
@@ -1718,6 +1793,119 @@ class ApiServerTests(unittest.TestCase):
             self.assertTrue(list(debug_dir.glob("selected_before_00001_*.png")))
             self.assertTrue(list(debug_dir.glob("selected_before_plus_offset_00004_*.png")))
 
+    def test_offline_session_recorder_receives_start_frames_stop_result_and_finish(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
+            ]
+        )
+        recorder = FakeSessionRecorder(active=False)
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                offline_peak_after_delay_frames=1,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                roi3_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                difference_threshold=5.0,
+                stop_wait_timeout_seconds=2.0,
+            ),
+            logger=self.make_null_logger("test_offline_session_recorder_receives_start_frames_stop_result_and_finish"),
+            session_recorder=recorder,
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.12)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        call_names = [name for name, _ in recorder.calls]
+        self.assertEqual(call_names[0], "start_session")
+        self.assertIn("record_frame", call_names)
+        self.assertIn("mark_offline_stop_requested", call_names)
+        self.assertIn("record_offline_result", call_names)
+        self.assertIn("finish_session", call_names)
+        frame_call = next(fields for name, fields in recorder.calls if name == "record_frame")
+        self.assertEqual(frame_call["frame_seq"], 1)
+        self.assertEqual(frame_call["source"], "offline_capture")
+        self.assertEqual(stop["info"], "offline_stop_completed")
+
+    def test_offline_manager_creates_real_session_recording_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
+                ]
+            )
+            recorder = session_recorder.SessionDataRecorder(
+                session_recorder.SessionRecorderConfig(
+                    enabled=True,
+                    output_dir=tmp,
+                    frame_format="png",
+                    max_writer_queue=64,
+                    include_online_response=True,
+                    include_trace_json=True,
+                    package_on_finish=True,
+                ),
+                logger=self.make_null_logger("test_offline_manager_creates_real_session_recording_package"),
+                id_factory=lambda point_id: f"20260618_103000_000_point_{point_id}_abcdef",
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    offline_peak_after_delay_frames=1,
+                    offline_peak_end_diff_threshold=7.0,
+                    roi2_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_manager_creates_real_session_recording_package_manager"),
+                session_recorder=recorder,
+            )
+
+            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            time.sleep(0.12)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+            self.assertEqual(stop["info"], "offline_stop_completed")
+            package_path = Path(tmp) / "session_20260618_103000_000_point_123_abcdef.zip"
+            self.assertTrue(package_path.exists())
+            with zipfile.ZipFile(package_path) as archive:
+                names = archive.namelist()
+                self.assertIn("manifest.json", names)
+                self.assertIn("events.jsonl", names)
+                self.assertIn("results/offline_result.json", names)
+                self.assertIn("trace.json", names)
+                self.assertIn("checksums.json", names)
+                self.assertTrue(any(name.startswith("frames/") and name.endswith(".png") for name in names))
+                event_types = [
+                    json.loads(line)["event_type"]
+                    for line in archive.read("events.jsonl").decode("utf-8").splitlines()
+                ]
+                self.assertIn("offline_start", event_types)
+                self.assertIn("offline_frame", event_types)
+                self.assertIn("offline_stop_requested", event_types)
+                self.assertIn("offline_result", event_types)
+                self.assertIn("offline_end", event_types)
+
     def test_offline_debug_final_before_after_names_include_source_frame_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             frames = self.SequenceFrameSource(
@@ -2750,6 +2938,26 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("step=convert_provider_completed", log_text)
         self.assertIn("step=json_encode_completed", log_text)
         self.assertIn("perf_counter_ns=", log_text)
+
+    def test_api_server_records_online_request_timing_when_session_recording_active(self):
+        recorder = FakeSessionRecorder(active=True)
+        server = api_server.ApiServer(
+            FakeOnlineProvider(),
+            self.make_null_logger("test_api_server_records_online_request_timing_when_session_recording_active"),
+            offline_manager=Mock(handle=lambda arg: {"success": True}),
+            session_recorder=recorder,
+        )
+        client = FakeClientSocket()
+
+        server._send_response(client, "ONLINE;31415;{}")
+
+        response = json.loads(client.sent.decode("utf-8").strip())
+        self.assertEqual(response["Depth"], 40)
+        online_call = next(fields for name, fields in recorder.calls if name == "record_online_request")
+        self.assertEqual(online_call["response_kind"], "online_success")
+        self.assertEqual(online_call["response_summary"]["Depth"], 40)
+        self.assertEqual(online_call["latest_frame_seq"], 99)
+        self.assertGreaterEqual(online_call["request_ended_perf_counter_ns"], online_call["request_started_perf_counter_ns"])
 
     def test_mobile_comm_engine_configures_callbacks_and_d3d_window(self):
         comm = Mock()

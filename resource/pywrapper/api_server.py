@@ -23,6 +23,8 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
+from session_recorder import SessionDataRecorder, parse_session_recorder_config
+
 
 PASSWORD = "31415"
 DEFAULT_HOST = "127.0.0.1"
@@ -1174,6 +1176,19 @@ def load_offline_config(logger: logging.Logger) -> OfflineConfig:
     return parse_offline_config(settings, logger)
 
 
+def load_session_recorder_config(logger: logging.Logger):
+    settings_path = resolve_settings_path()
+    if not settings_path.exists():
+        raise FileNotFoundError(f"required settings file not found: {settings_path}")
+
+    with open(settings_path, "r", encoding="utf-8") as f:
+        settings = json.load(f)
+
+    config = parse_session_recorder_config(settings)
+    logger.info("session recorder config loaded: %s", safe_json_text(config.sanitized()))
+    return config
+
+
 def parse_roi4_rect(peak: dict) -> Optional[Tuple[int, int, int, int]]:
     raw = peak.get("roi4_rect")
     if raw is None:
@@ -1724,11 +1739,13 @@ class OfflineSessionManager:
         debug_saver: Optional[DebugFrameSaver] = None,
         screenshot_frame_fetcher: Optional[Callable[[], Optional[FrameSnapshot]]] = None,
         ultrasound_depth_cache: Optional[UltrasoundDepthCache] = None,
+        session_recorder: Optional[SessionDataRecorder] = None,
     ):
         self._provider_fetcher = provider_fetcher
         self._config = config
         self._logger = logger or logging.getLogger("pywrapper_api_server")
         self._debug_saver = debug_saver or DebugFrameSaver()
+        self._session_recorder = session_recorder
         self._ultrasound_depth_cache = ultrasound_depth_cache or UltrasoundDepthCache(
             config.provider_ultrasound_depth_cache_path,
             self._logger,
@@ -2010,6 +2027,12 @@ class OfflineSessionManager:
             debug_dir=debug_dir,
             meta={"point_id": point_id, "duration_s": duration_s, "is_save": bool(is_save)},
         )
+        if self._session_recorder is not None:
+            self._session_recorder.start_session(
+                point_id=point_id,
+                meta=dict(session.meta),
+                server={"component": "pywrapper_api_server"},
+            )
         session.thread = threading.Thread(target=self._run_session, args=(session,), daemon=True, name=f"pywrapper-offline-{point_id}")
         self._active_session = session
         self._offline_diag(
@@ -2039,6 +2062,8 @@ class OfflineSessionManager:
 
     def _stop_locked(self, session: OfflineSession) -> dict:
         session.stop_event.set()
+        if self._session_recorder is not None:
+            self._session_recorder.mark_offline_stop_requested(point_id=session.point_id)
         timeout_s = max(1.0, min(float(self._config.stop_wait_timeout_seconds), 120.0))
         self._offline_diag(
             "stop_wait_begin",
@@ -2084,6 +2109,16 @@ class OfflineSessionManager:
 
     def _append_frame_buffer(self, session: OfflineSession, frame: np.ndarray, seq: int, ts: float, frame_index: int, tag: str, roi1_gray: float) -> None:
         session.frame_buffer.append(OfflineFrameRecord(np.array(frame, copy=True), int(seq), float(ts), int(frame_index), str(tag), float(roi1_gray)))
+        if self._session_recorder is not None:
+            self._session_recorder.record_frame(
+                frame,
+                frame_seq=int(seq),
+                frame_ts=float(ts),
+                frame_index=int(frame_index),
+                source="offline_capture",
+                tag=str(tag),
+                metrics={"roi1_mean": float(roi1_gray)},
+            )
         limit = max(1, int(self._config.offline_tmp_max_buffer_frames))
         if len(session.frame_buffer) > limit:
             session.frame_buffer = session.frame_buffer[-limit:]
@@ -2894,6 +2929,34 @@ class OfflineSessionManager:
             diff_path=response.get("diff_path"),
         )
 
+    def _finalize_session_recording(self, session: OfflineSession, reason: str) -> bool:
+        if self._session_recorder is None:
+            return True
+        try:
+            response = session.response if isinstance(session.response, dict) else {}
+            result_summary = dict(response)
+            result_summary["recording_finalize_reason"] = reason
+            self._session_recorder.record_offline_result(result_summary)
+            package_path = self._session_recorder.finish_session()
+            self._offline_diag(
+                "session_recording_finalized",
+                point_id=session.point_id,
+                reason=reason,
+                package_path=str(package_path) if package_path is not None else None,
+            )
+            return True
+        except Exception as exc:
+            self._logger.exception("SESSION_RECORDING failed during OFFLINE finalization: point_id=%s", session.point_id)
+            session.response = {
+                "success": False,
+                "info": "session_recording_failed",
+                "point_id": session.point_id,
+                "error": str(exc),
+            }
+            self._log_final_response_ready(session)
+            self._mark_finished_event_set(session, "session_recording_failed")
+            return False
+
     def _attach_treatment_result_fields(self, session: OfflineSession) -> None:
         if not isinstance(session.response, dict):
             return
@@ -3222,6 +3285,8 @@ class OfflineSessionManager:
                     "point_id": session.point_id,
                 }
                 self._attach_treatment_result_fields(session)
+                if not self._finalize_session_recording(session, "final_output_save_failed"):
+                    return
                 self._log_final_response_ready(session)
                 self._mark_finished_event_set(session, "final_output_save_failed")
                 return
@@ -3257,6 +3322,8 @@ class OfflineSessionManager:
                     "point_id": session.point_id,
                 }
                 self._attach_treatment_result_fields(session)
+                if not self._finalize_session_recording(session, "debug_save_failed"):
+                    return
                 self._log_final_response_ready(session)
                 self._mark_finished_event_set(session, "debug_save_failed")
                 return
@@ -3268,6 +3335,8 @@ class OfflineSessionManager:
                 self._attach_treatment_result_fields(session)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
+                if not self._finalize_session_recording(session, "pending_error_response"):
+                    return
                 self._log_final_response_ready(session)
                 self._mark_finished_event_set(session, "pending_error_response")
                 return
@@ -3284,6 +3353,8 @@ class OfflineSessionManager:
                 self._attach_treatment_result_fields(session)
                 if session.debug_dir is not None:
                     session.response["debug_dir"] = session.debug_dir
+                if not self._finalize_session_recording(session, "db_update_failed"):
+                    return
                 self._log_final_response_ready(session)
                 self._mark_finished_event_set(session, "db_update_failed")
                 return
@@ -3316,6 +3387,8 @@ class OfflineSessionManager:
             session.response.update(result_paths)
             if session.debug_dir is not None:
                 session.response["debug_dir"] = session.debug_dir
+            if not self._finalize_session_recording(session, "offline_stop_completed"):
+                return
             self._log_final_response_ready(session)
             self._mark_finished_event_set(session, "offline_stop_completed")
 
@@ -3641,10 +3714,17 @@ def try_parse_buffer(buffer: str) -> Optional[Tuple[str, str]]:
 
 
 class ApiServer:
-    def __init__(self, provider: PyMobileCommProvider, logger: logging.Logger, offline_manager: OfflineSessionManager):
+    def __init__(
+        self,
+        provider: PyMobileCommProvider,
+        logger: logging.Logger,
+        offline_manager: OfflineSessionManager,
+        session_recorder: Optional[SessionDataRecorder] = None,
+    ):
         self._provider = provider
         self._logger = logger
         self._offline_manager = offline_manager
+        self._session_recorder = session_recorder
         self._stop_event = threading.Event()
         self._server_socket: Optional[socket.socket] = None
 
@@ -3687,6 +3767,7 @@ class ApiServer:
     def _send_response(self, client_socket: socket.socket, request_text: str) -> None:
         trace_id = None
         is_online_request = request_type_hint(request_text) == "ONLINE"
+        request_started_perf_counter_ns = time.perf_counter_ns() if is_online_request else None
         if is_online_request:
             trace_id = f"{threading.get_ident()}-{time.time_ns()}"
             log_online_timepoint(
@@ -3724,6 +3805,21 @@ class ApiServer:
             response = json_response({"success": False, "info": "request_failed", "error": str(exc)})
             if is_online_request:
                 log_online_timepoint(self._logger, trace_id, "json_encode_completed", response_len=len(response))
+        if is_online_request and self._session_recorder is not None and self._session_recorder.is_active():
+            request_ended_perf_counter_ns = time.perf_counter_ns()
+            response_summary = json.loads(response)
+            response_kind = "online_success"
+            if isinstance(response_summary, dict) and response_summary.get("success") is False:
+                response_kind = str(response_summary.get("info") or "online_error")
+            latest_frame = self._provider.get_latest_frame()
+            self._session_recorder.record_online_request(
+                trace_id=trace_id,
+                request_started_perf_counter_ns=int(request_started_perf_counter_ns),
+                request_ended_perf_counter_ns=int(request_ended_perf_counter_ns),
+                response_kind=response_kind,
+                response_summary=response_summary,
+                latest_frame_seq=int(latest_frame.seq) if latest_frame is not None else None,
+            )
         if is_online_request:
             log_online_timepoint(self._logger, trace_id, "socket_send_start", response_len=len(response))
         self._logger.info("response sent: %s", response)
@@ -3785,6 +3881,8 @@ def main(argv=None) -> int:
     logger = build_logger()
     log_process_environment(logger)
     offline_config = load_offline_config(logger)
+    session_recorder_config = load_session_recorder_config(logger)
+    session_recorder = SessionDataRecorder(session_recorder_config, logger=logger)
     ultrasound_depth_cache = UltrasoundDepthCache(
         offline_config.provider_ultrasound_depth_cache_path,
         logger,
@@ -3800,9 +3898,10 @@ def main(argv=None) -> int:
         config=offline_config,
         logger=logger,
         ultrasound_depth_cache=ultrasound_depth_cache,
+        session_recorder=session_recorder,
     )
     try:
-        ApiServer(provider, logger, offline_manager).serve_forever(args.host, args.port)
+        ApiServer(provider, logger, offline_manager, session_recorder=session_recorder).serve_forever(args.host, args.port)
     finally:
         provider.close()
     return 0
