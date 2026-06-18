@@ -90,6 +90,7 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn("status --porcelain", text)
         self.assertIn("Remove-Item", text)
         self.assertIn(".git", text)
+        self.assertIn("http.version=HTTP/1.1", text)
         self.assertIn("push -u origin HEAD:main", text)
 
     def test_publish_release_stops_running_server_before_packaging(self):
@@ -104,6 +105,26 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn(stop_call, text)
         self.assertLess(text.index(stop_call), text.index(package_call))
         self.assertIn("Stop script failed with exit code", text)
+
+    def test_publish_release_packages_timeline_analyzer_into_va_release_source(self):
+        script_path = WORKSPACE_ROOT / "tools" / "publish_release.ps1"
+
+        self.assertTrue(script_path.exists(), script_path)
+        text = script_path.read_text(encoding="utf-8")
+        analyzer_script_assignment = '$timelineAnalyzerPackageScript = Join-Path $packageRoot "package_session_timeline_analyzer.bat"'
+        analyzer_exe_assignment = '$timelineAnalyzerExe = Join-Path $packageRoot "dist\\session_timeline_analyzer.exe"'
+        release_exe_assignment = '$releaseTimelineAnalyzerExe = Join-Path $releaseSourceDir "session_timeline_analyzer.exe"'
+        analyzer_package_call = "& $timelineAnalyzerPackageScript"
+        release_sync = "Get-ChildItem -LiteralPath $releaseSourceDir -Force"
+
+        self.assertIn(analyzer_script_assignment, text)
+        self.assertIn(analyzer_exe_assignment, text)
+        self.assertIn(release_exe_assignment, text)
+        self.assertIn(analyzer_package_call, text)
+        self.assertIn("Session timeline analyzer packaging failed with exit code", text)
+        self.assertIn("Session timeline analyzer exe not found after packaging", text)
+        self.assertIn("Copy-Item -LiteralPath $timelineAnalyzerExe -Destination $releaseTimelineAnalyzerExe -Force", text)
+        self.assertLess(text.index(analyzer_package_call), text.index(release_sync))
 
 
 if __name__ == "__main__":

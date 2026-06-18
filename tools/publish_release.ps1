@@ -2,18 +2,25 @@ $ErrorActionPreference = "Stop"
 
 $packageRoot = "D:\ocr3"
 $packageScript = Join-Path $packageRoot "package_pywrapper_server.bat"
+$timelineAnalyzerPackageScript = Join-Path $packageRoot "package_session_timeline_analyzer.bat"
 $stopScript = Join-Path $packageRoot "closeserver.bat"
 $releaseSourceDir = Join-Path $packageRoot "dist\OCRSERVER"
+$timelineAnalyzerExe = Join-Path $packageRoot "dist\session_timeline_analyzer.exe"
+$releaseTimelineAnalyzerExe = Join-Path $releaseSourceDir "session_timeline_analyzer.exe"
 $releaseRepo = "D:\ocr3\VA"
 $commitMessage = "release: OCRSERVER $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
 Write-Host "[INFO] Package root: $packageRoot"
 Write-Host "[INFO] Stop script: $stopScript"
 Write-Host "[INFO] Release source: $releaseSourceDir"
+Write-Host "[INFO] Timeline analyzer package script: $timelineAnalyzerPackageScript"
 Write-Host "[INFO] Release repo: $releaseRepo"
 
 if (-not (Test-Path $packageScript)) {
     throw "Package script not found: $packageScript"
+}
+if (-not (Test-Path $timelineAnalyzerPackageScript)) {
+    throw "Session timeline analyzer package script not found: $timelineAnalyzerPackageScript"
 }
 if (-not (Test-Path $stopScript)) {
     throw "Stop script not found: $stopScript"
@@ -57,6 +64,21 @@ if (-not (Test-Path $releaseSourceDir)) {
     throw "Release source directory not found after packaging: $releaseSourceDir"
 }
 
+& $timelineAnalyzerPackageScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Session timeline analyzer packaging failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path $timelineAnalyzerExe)) {
+    throw "Session timeline analyzer exe not found after packaging: $timelineAnalyzerExe"
+}
+
+Copy-Item -LiteralPath $timelineAnalyzerExe -Destination $releaseTimelineAnalyzerExe -Force
+if (-not (Test-Path $releaseTimelineAnalyzerExe)) {
+    throw "Session timeline analyzer exe was not copied into release source: $releaseTimelineAnalyzerExe"
+}
+Write-Host "[OK] Session timeline analyzer added to release source:"
+Write-Host "     $releaseTimelineAnalyzerExe"
+
 Get-ChildItem -LiteralPath $releaseRepo -Force |
     Where-Object { $_.Name -ne ".git" } |
     Remove-Item -Recurse -Force
@@ -83,7 +105,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "git commit failed for: $releaseRepo"
 }
 
-git -C $releaseRepo push -u origin HEAD:main
+git -C $releaseRepo -c http.version=HTTP/1.1 push -u origin HEAD:main
 if ($LASTEXITCODE -ne 0) {
     throw "git push failed for: $releaseRepo"
 }
