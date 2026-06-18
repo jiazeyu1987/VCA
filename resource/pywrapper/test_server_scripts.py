@@ -91,6 +91,8 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn("Remove-Item", text)
         self.assertIn(".git", text)
         self.assertIn("http.version=HTTP/1.1", text)
+        self.assertIn("http.proxy=", text)
+        self.assertIn("https.proxy=", text)
         self.assertIn("push -u origin HEAD:main", text)
 
     def test_publish_release_stops_running_server_before_packaging(self):

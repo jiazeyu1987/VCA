@@ -105,7 +105,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "git commit failed for: $releaseRepo"
 }
 
-git -C $releaseRepo -c http.version=HTTP/1.1 push -u origin HEAD:main
+git -C $releaseRepo -c http.version=HTTP/1.1 -c http.proxy= -c https.proxy= push -u origin HEAD:main
 if ($LASTEXITCODE -ne 0) {
     throw "git push failed for: $releaseRepo"
 }
