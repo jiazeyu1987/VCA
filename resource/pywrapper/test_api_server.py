@@ -159,7 +159,7 @@ class ApiServerTests(unittest.TestCase):
                     return
         self.fail(f"expected color {expected} near ({x}, {y})")
 
-    def create_segment_images_db_pair(self, root_dir: str, point_id: int = 123) -> None:
+    def create_segment_images_db_pair(self, root_dir: str, point_id: int = 123, treat_flag: int = 0) -> None:
         for db_name in ("ccwssm", "zccwssm"):
             conn = sqlite3.connect(str(Path(root_dir) / db_name))
             try:
@@ -179,9 +179,9 @@ class ApiServerTests(unittest.TestCase):
                     """
                     INSERT INTO SegmentImagesInfo
                         (ID, PointID, ImagePath, TreatFlag, ErrorFlag, ModifyTime)
-                    VALUES (?, ?, '', 0, 0, '')
+                    VALUES (?, ?, '', ?, 0, '')
                     """,
-                    (point_id, point_id),
+                    (point_id, point_id, treat_flag),
                 )
                 conn.commit()
             finally:
@@ -2405,12 +2405,48 @@ class ApiServerTests(unittest.TestCase):
             self.assertTrue(Path(stop["after_path"]).exists())
             self.assertTrue(Path(stop["diff_path"]).exists())
 
-    def test_offline_green_save_updates_db_treat_flag(self):
+    def test_offline_green_save_preserves_db_treat_flag(self):
+        for initial_treat_flag in (0, 1, 2):
+            with self.subTest(initial_treat_flag=initial_treat_flag):
+                with tempfile.TemporaryDirectory() as tmp:
+                    self.create_segment_images_db_pair(tmp, treat_flag=initial_treat_flag)
+                    frames = self.SequenceFrameSource([
+                        api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
+                        api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+                    ])
+                    manager = api_server.OfflineSessionManager(
+                        provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
+                        frame_fetcher=frames,
+                        config=api_server.OfflineConfig(
+                            peak_detect_enabled=True,
+                            roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                            roi3_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                            difference_threshold=5.0,
+                            image_output_dir=tmp,
+                            db_root_dir=tmp,
+                            result_flag_path=str(Path(tmp) / "result.txt"),
+                            stop_wait_timeout_seconds=2.0,
+                        ),
+                        logger=self.make_null_logger("test_offline_green_save_preserves_db_treat_flag"),
+                    )
+
+                    manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+                    time.sleep(0.05)
+                    stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+                    self.assertEqual(stop["info"], "offline_stop_completed")
+                    self.assertEqual(stop["roi2_color"], "green")
+                    self.assertEqual(
+                        self.read_segment_treat_flags(tmp),
+                        {"ccwssm": initial_treat_flag, "zccwssm": initial_treat_flag},
+                    )
+
+    def test_offline_red_save_preserves_db_treat_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.create_segment_images_db_pair(tmp)
+            self.create_segment_images_db_pair(tmp, treat_flag=1)
             frames = self.SequenceFrameSource([
                 api_server.FrameSnapshot(np.full((20, 20, 3), 10, dtype=np.uint8), 1, 1.0),
-                api_server.FrameSnapshot(np.full((20, 20, 3), 20, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((20, 20, 3), 12, dtype=np.uint8), 2, 2.0),
             ])
             manager = api_server.OfflineSessionManager(
                 provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
@@ -2425,7 +2461,7 @@ class ApiServerTests(unittest.TestCase):
                     result_flag_path=str(Path(tmp) / "result.txt"),
                     stop_wait_timeout_seconds=2.0,
                 ),
-                logger=self.make_null_logger("test_offline_green_save_updates_db_treat_flag"),
+                logger=self.make_null_logger("test_offline_red_save_preserves_db_treat_flag"),
             )
 
             manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
@@ -2433,7 +2469,7 @@ class ApiServerTests(unittest.TestCase):
             stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
 
             self.assertEqual(stop["info"], "offline_stop_completed")
-            self.assertEqual(stop["roi2_color"], "green")
+            self.assertEqual(stop["roi2_color"], "red")
             self.assertEqual(self.read_segment_treat_flags(tmp), {"ccwssm": 1, "zccwssm": 1})
 
     def test_offline_db_update_failure_returns_error(self):

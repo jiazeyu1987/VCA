@@ -986,17 +986,18 @@ def update_segment_images_info(db_root_dir: Optional[str], point_id, before_path
     db_paths = [db_root / "ccwssm", db_root / "zccwssm"]
     modify_time = datetime.now().strftime("%Y_%m_%d-%H_%M_%S_%f")[:-3]
     image_path = before_path + ";" + after_path + ";" + after_path.replace("_after", "_diff")
-    treat_flag = 1 if treatment_ok else 0
     sql = """
         UPDATE SegmentImagesInfo
-        SET ImagePath = ?, TreatFlag = ?, ModifyTime = ?
+        SET ImagePath = ?, ModifyTime = ?
         WHERE ID = ?
     """
     for db_path in db_paths:
         conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         try:
             cur = conn.cursor()
-            cur.execute(sql, (image_path, treat_flag, modify_time, point_id))
+            # SegmentImagesInfo.TreatFlag stores the treatment type chosen in the main program.
+            # OFFLINE result evaluation must not overwrite it with the compare outcome.
+            cur.execute(sql, (image_path, modify_time, point_id))
             if cur.rowcount <= 0:
                 raise LookupError(f"SegmentImagesInfo update matched no rows in {db_path} for point_id={point_id}")
             conn.commit()
