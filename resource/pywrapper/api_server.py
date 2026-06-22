@@ -2195,21 +2195,50 @@ class OfflineSessionManager:
         records = list(session.frame_buffer)
         if not records:
             raise ValueError("OFFLINE requires buffered frames for ROI1 boundary selection")
-        active_threshold = float(before_gray_mean) + float(self._config.offline_peak_threshold or 0.0)
-        active_extension_threshold = float(before_gray_mean) + ROI1_BOUNDARY_ACTIVE_EXTENSION_OFFSET
-        return_to_baseline_threshold = float(before_gray_mean) + ROI1_BOUNDARY_RETURN_TO_BASELINE_OFFSET
+        configured_peak_threshold = self._config.offline_peak_threshold
+        if configured_peak_threshold is None:
+            raise ValueError("OFFLINE peak threshold is required for ROI1 boundary selection")
+        active_threshold = float(configured_peak_threshold)
+        if active_threshold <= 0.0:
+            raise ValueError("OFFLINE peak threshold must be > 0")
+        active_extension_threshold = max(
+            float(before_gray_mean) + ROI1_BOUNDARY_ACTIVE_EXTENSION_OFFSET,
+            active_threshold,
+        )
+        peak_end_diff_threshold = float(self._config.offline_peak_end_diff_threshold)
+        peak_end_threshold = float(before_gray_mean) + peak_end_diff_threshold
+        after_delay_frames = max(0, int(self._config.offline_peak_after_delay_frames))
         core_start, core_end = self._find_roi1_core_interval(records, active_threshold)
         active_start = core_start
-        active_end = core_end
         while active_start > 0 and float(records[active_start - 1].roi1_gray) >= active_extension_threshold:
             active_start -= 1
-        while active_end + 1 < len(records) and float(records[active_end + 1].roi1_gray) > return_to_baseline_threshold:
-            active_end += 1
         before_index = active_start - ROI1_BOUNDARY_OFFSET
         if before_index < 0:
             raise ValueError("OFFLINE requires at least two frames before treatment active interval")
         final_before_index = int(session.initial_before_record.frame_index) if session.initial_before_record is not None else int(records[0].frame_index)
-        after_index = active_end + ROI1_BOUNDARY_OFFSET
+        peak_end_index = None
+        for index in range(core_end + 1, len(records)):
+            if abs(float(records[index].roi1_gray) - float(before_gray_mean)) <= peak_end_diff_threshold:
+                peak_end_index = index
+                break
+        if peak_end_index is None:
+            self._offline_diag(
+                "roi1_boundary_peak_end_not_found",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                core_start_index=int(records[core_start].frame_index),
+                core_end_index=int(records[core_end].frame_index),
+                active_start_index=int(records[active_start].frame_index),
+                before_index=final_before_index,
+                active_threshold=round(float(active_threshold), 6),
+                active_extension_threshold=round(float(active_extension_threshold), 6),
+                peak_end_threshold=round(float(peak_end_threshold), 6),
+                peak_end_diff_threshold=round(float(peak_end_diff_threshold), 6),
+                after_delay_frames=int(after_delay_frames),
+                buffered_frame_count=len(records),
+            )
+            return
+        after_index = peak_end_index + after_delay_frames
         after_fallback_used = False
         if after_index >= len(records):
             after_index = len(records) - 1
@@ -2232,13 +2261,14 @@ class OfflineSessionManager:
             core_start_index=int(records[core_start].frame_index),
             core_end_index=int(records[core_end].frame_index),
             active_start_index=int(records[active_start].frame_index),
-            active_end_index=int(records[active_end].frame_index),
+            peak_end_index=int(records[peak_end_index].frame_index),
             before_index=final_before_index,
             boundary_before_candidate_index=int(records[before_index].frame_index),
             after_index=int(records[after_index].frame_index),
             active_threshold=round(float(active_threshold), 6),
             active_extension_threshold=round(float(active_extension_threshold), 6),
-            return_to_baseline_threshold=round(float(return_to_baseline_threshold), 6),
+            peak_end_threshold=round(float(peak_end_threshold), 6),
+            after_delay_frames=int(after_delay_frames),
             after_fallback_used=bool(after_fallback_used),
         )
 
@@ -3061,8 +3091,10 @@ class OfflineSessionManager:
                             point_id=session.point_id,
                             capture_source="image_matrix",
                             before_gray_mean=round(float(before_gray_mean), 6),
-                            peak_threshold=round(float(before_gray_mean + float(self._config.offline_peak_threshold)), 6),
-                            threshold_offset=round(float(self._config.offline_peak_threshold), 6) if self._config.offline_peak_threshold is not None else None,
+                            peak_threshold=round(float(self._config.offline_peak_threshold), 6),
+                            threshold_mode="absolute",
+                            end_diff_threshold=round(float(self._config.offline_peak_end_diff_threshold), 6),
+                            after_delay_frames=int(self._config.offline_peak_after_delay_frames),
                         )
                 self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, frame_record.tag, roi1_gray)
                 time.sleep(0.01)

@@ -1179,7 +1179,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(stop["roi2_color"], "red")
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
 
-    def test_offline_peak_selection_uses_second_before_and_second_after_for_roi2(self):
+    def test_offline_peak_selection_respects_zero_after_delay_frames(self):
         frames = self.SequenceFrameSource(
             [
                 api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
@@ -1209,7 +1209,7 @@ class ApiServerTests(unittest.TestCase):
                 stop_wait_timeout_seconds=2.0,
                 image_output_dir=None,
             ),
-            logger=self.make_null_logger("test_offline_peak_selection_uses_second_before_and_second_after_for_roi2"),
+            logger=self.make_null_logger("test_offline_peak_selection_respects_zero_after_delay_frames"),
         )
 
         start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
@@ -1219,9 +1219,51 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertEqual(stop["info"], "offline_stop_completed")
         self.assertEqual(stop["roi2_before_mean"], 10.0)
-        self.assertEqual(stop["roi2_after_mean"], 14.0)
-        self.assertEqual(stop["roi2_diff"], 4.0)
+        self.assertEqual(stop["roi2_after_mean"], 13.0)
+        self.assertEqual(stop["roi2_diff"], 3.0)
         self.assertEqual(stop["roi2_color"], "green")
+        self.assertEqual(stop["after_method"], "roi1_boundary_after2")
+
+    def test_offline_peak_selection_uses_absolute_threshold_before_stop_fallback(self):
+        frames = self.SequenceFrameSource(
+            [
+                api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 13, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 24, dtype=np.uint8), 3, 3.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 25, dtype=np.uint8), 4, 4.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 26, dtype=np.uint8), 5, 5.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 24, dtype=np.uint8), 6, 6.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 19, dtype=np.uint8), 7, 7.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 18, dtype=np.uint8), 8, 8.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 17, dtype=np.uint8), 9, 9.0),
+                api_server.FrameSnapshot(np.full((40, 40, 3), 16, dtype=np.uint8), 10, 10.0),
+            ]
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+            frame_fetcher=frames,
+            config=api_server.OfflineConfig(
+                peak_detect_enabled=True,
+                offline_peak_enabled=True,
+                offline_peak_threshold=25.0,
+                offline_peak_after_delay_frames=2,
+                offline_peak_end_diff_threshold=7.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                roi3_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=2.0,
+                stop_wait_timeout_seconds=2.0,
+            ),
+            logger=self.make_null_logger("test_offline_peak_selection_uses_absolute_threshold_before_stop_fallback"),
+        )
+
+        manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+        time.sleep(0.2)
+        stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+
+        self.assertEqual(stop["info"], "offline_stop_completed")
+        self.assertEqual(stop["roi2_before_mean"], 12.0)
+        self.assertEqual(stop["roi2_after_mean"], 17.0)
+        self.assertEqual(stop["roi2_diff"], 5.0)
         self.assertEqual(stop["after_method"], "roi1_boundary_after2")
 
     def test_offline_peak_selection_extends_shoulders_before_selecting_second_boundary_frames(self):
@@ -1985,6 +2027,8 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn("OFFLINE diag session_thread_enter:", log_text)
         self.assertIn("OFFLINE diag before_captured:", log_text)
         self.assertIn("OFFLINE diag peak_threshold_initialized:", log_text)
+        self.assertIn('"peak_threshold": 25.0', log_text)
+        self.assertNotIn('"peak_threshold": 35.0', log_text)
         self.assertNotIn("OFFLINE diag before_selected:", log_text)
         self.assertIn("OFFLINE diag roi1_boundary_interval_selected:", log_text)
         self.assertIn("OFFLINE diag after_selected:", log_text)
