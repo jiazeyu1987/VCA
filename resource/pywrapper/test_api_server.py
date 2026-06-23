@@ -1699,10 +1699,11 @@ class ApiServerTests(unittest.TestCase):
         manager._active_session = previous
         called = {}
 
-        def fake_start(point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns):
+        def fake_start(point_id, duration_s, is_save, mode_flag, received_wall_time, received_ts, received_perf_counter_ns):
             called["point_id"] = point_id
             called["duration_s"] = duration_s
             called["is_save"] = is_save
+            called["mode_flag"] = mode_flag
             called["received_wall_time_is_set"] = bool(received_wall_time)
             called["received_ts_type"] = type(received_ts).__name__
             called["received_perf_counter_ns_type"] = type(received_perf_counter_ns).__name__
@@ -1721,6 +1722,7 @@ class ApiServerTests(unittest.TestCase):
                 "point_id": 222,
                 "duration_s": 5.0,
                 "is_save": False,
+                "mode_flag": None,
                 "received_wall_time_is_set": True,
                 "received_ts_type": "float",
                 "received_perf_counter_ns_type": "int",
@@ -1746,7 +1748,7 @@ class ApiServerTests(unittest.TestCase):
         previous.finished_event = threading.Event()
         previous.thread = self.FakeThread()
         manager._active_session = previous
-        manager._start_locked = lambda point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns: {"success": True, "info": "offline_started", "point_id": point_id}
+        manager._start_locked = lambda point_id, duration_s, is_save, mode_flag, received_wall_time, received_ts, received_perf_counter_ns: {"success": True, "info": "offline_started", "point_id": point_id}
 
         manager.handle('{"point_id": 222, "time_out": 5, "is_save": false}')
 
@@ -1819,9 +1821,9 @@ class ApiServerTests(unittest.TestCase):
                 logger=self.make_null_logger("test_offline_debug_save_flushes_buffered_frames_and_jsonl"),
             )
 
-            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true, "mode_flag": 2}')
             time.sleep(0.12)
-            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true, "mode_flag": 2}')
 
             debug_dir = Path(start["debug_dir"])
             self.assertEqual(debug_dir, Path(stop["debug_dir"]))
@@ -1977,16 +1979,16 @@ class ApiServerTests(unittest.TestCase):
                 logger=self.make_null_logger("test_offline_debug_final_before_after_names_include_source_frame_name"),
             )
 
-            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            start = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true, "mode_flag": 2}')
             time.sleep(0.12)
-            manager.handle('{"point_id": 123, "time_out": 10, "is_save": true}')
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": true, "mode_flag": 2}')
 
             debug_dir = Path(start["debug_dir"])
             before_files = [path.name for path in debug_dir.glob("final_before_*.png")]
             after_files = [path.name for path in debug_dir.glob("final_after_*.png")]
             self.assertEqual(len(before_files), 1)
             self.assertEqual(len(after_files), 1)
-            self.assertTrue(before_files[0].startswith("final_before_00001_"))
+            self.assertTrue(before_files[0].startswith("final_before_00004_"))
             self.assertTrue(before_files[0].endswith("_frame.png"))
             self.assertTrue(after_files[0].startswith("final_after_00006_"))
             self.assertTrue(after_files[0].endswith("_frame.png"))

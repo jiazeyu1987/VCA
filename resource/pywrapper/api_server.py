@@ -1927,6 +1927,7 @@ class OfflineSessionManager:
     def handle(self, arg_json_text: Optional[str]) -> dict:
         arg_obj = self._parse_arg(arg_json_text)
         point_id = arg_obj.get("point_id")
+        mode_flag = arg_obj.get("mode_flag")
         if point_id is None:
             return {"success": False, "info": "missing_point_id"}
         if "time_out" not in arg_obj:
@@ -2000,6 +2001,7 @@ class OfflineSessionManager:
                 point_id,
                 duration_s,
                 is_save,
+                mode_flag,
                 received_wall_time,
                 received_ts,
                 received_perf_counter_ns,
@@ -2010,6 +2012,7 @@ class OfflineSessionManager:
         point_id,
         duration_s: float,
         is_save: bool,
+        mode_flag,
         received_wall_time: str,
         received_ts: float,
         received_perf_counter_ns: int,
@@ -2026,7 +2029,12 @@ class OfflineSessionManager:
             received_ts=received_ts,
             received_perf_counter_ns=received_perf_counter_ns,
             debug_dir=debug_dir,
-            meta={"point_id": point_id, "duration_s": duration_s, "is_save": bool(is_save)},
+            meta={
+                "point_id": point_id,
+                "duration_s": duration_s,
+                "is_save": bool(is_save),
+                "mode_flag": mode_flag,
+            },
         )
         if self._session_recorder is not None:
             self._session_recorder.start_session(
@@ -2643,7 +2651,9 @@ class OfflineSessionManager:
                     },
                 )
                 after_written = True
-        before_record = self._find_buffered_frame_record(session, session.before_seq, session.before_ts)
+        before_record = session.initial_before_record
+        if before_record is None:
+            before_record = self._find_buffered_frame_record(session, session.before_seq, session.before_ts)
         if before_record is not None:
             before_source_name = format_buffered_frame_name(before_record.frame_index, before_record.ts, before_record.tag)
             write_png(Path(session.debug_dir) / format_selected_debug_frame_name("before", before_source_name), before_record.frame)
@@ -2691,6 +2701,35 @@ class OfflineSessionManager:
                 continue
             return record
         return None
+
+    def _apply_before_frame_history_offset_if_available(self, session: OfflineSession) -> None:
+        try:
+            mode_flag = int(session.meta.get("mode_flag"))
+        except Exception:
+            mode_flag = None
+        if mode_flag != 2:
+            return
+        baseline = session.initial_before_record
+        if baseline is None:
+            return
+        offset = max(0, int(self._config.frame_history_offset))
+        if offset <= 0:
+            return
+        before_offset_seq = int(baseline.seq) + offset
+        before_offset_record = self._find_buffered_frame_record(session, before_offset_seq, None)
+        if before_offset_record is None:
+            self._offline_diag(
+                "before_offset_candidate_missing",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                baseline_frame_index=int(baseline.frame_index),
+                baseline_seq=int(baseline.seq),
+                offset=int(offset),
+                requested_seq=int(before_offset_seq),
+                buffered_frame_count=len(session.frame_buffer),
+            )
+            return
+        self._select_before_record_for_roi2(session, before_offset_record, "frame_history_offset_before")
 
     def _save_debug_outputs(self, session: OfflineSession) -> None:
         if not self._config.debug_save_enabled or not session.debug_dir:
@@ -3239,6 +3278,8 @@ class OfflineSessionManager:
                     "point_id": session.point_id,
                     "error": str(exc),
                 }
+            if pending_error_response is None and not session.roi4_after_selector_applied:
+                self._apply_before_frame_history_offset_if_available(session)
 
             roi2_metrics_start = self._finalization_stage_begin(
                 session,
