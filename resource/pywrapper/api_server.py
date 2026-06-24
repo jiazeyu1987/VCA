@@ -993,7 +993,12 @@ def update_segment_images_info(db_root_dir: Optional[str], point_id, before_path
         SET ImagePath = ?, ModifyTime = ?
         WHERE ID = ?
     """
+    matched_db_paths = []
+    row_miss_db_paths = []
     for db_path in db_paths:
+        if not db_path.exists():
+            row_miss_db_paths.append(str(db_path))
+            continue
         conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         try:
             cur = conn.cursor()
@@ -1001,11 +1006,25 @@ def update_segment_images_info(db_root_dir: Optional[str], point_id, before_path
             # OFFLINE result evaluation must not overwrite it with the compare outcome.
             cur.execute(sql, (image_path, modify_time, point_id))
             if cur.rowcount <= 0:
-                raise LookupError(f"SegmentImagesInfo update matched no rows in {db_path} for point_id={point_id}")
+                row_miss_db_paths.append(str(db_path))
+                continue
             conn.commit()
+            matched_db_paths.append(str(db_path))
             cur.close()
         finally:
             conn.close()
+    if matched_db_paths:
+        if row_miss_db_paths:
+            logging.getLogger("pywrapper_api_server").warning(
+                "SegmentImagesInfo update partially matched: point_id=%s matched=%s missed=%s",
+                point_id,
+                matched_db_paths,
+                row_miss_db_paths,
+            )
+        return
+    raise LookupError(
+        f"SegmentImagesInfo update matched no rows in {', '.join(row_miss_db_paths) or db_root_dir} for point_id={point_id}"
+    )
 
 
 def format_buffered_frame_name(frame_index: int, ts: float, tag: str) -> str:

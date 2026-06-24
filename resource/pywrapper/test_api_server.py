@@ -187,6 +187,53 @@ class ApiServerTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def create_primary_only_segment_images_db_pair(self, root_dir: str, point_id: int = 123, treat_flag: int = 0) -> None:
+        primary_db = Path(root_dir) / "ccwssm"
+        backup_db = Path(root_dir) / "zccwssm"
+        conn = sqlite3.connect(str(primary_db))
+        try:
+            conn.execute(
+                """
+                CREATE TABLE SegmentImagesInfo (
+                    ID INTEGER PRIMARY KEY,
+                    PointID INTEGER,
+                    ImagePath VARCHAR(500),
+                    TreatFlag TINYINT DEFAULT 0,
+                    ErrorFlag TINYINT DEFAULT 0,
+                    ModifyTime VARCHAR(100)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO SegmentImagesInfo
+                    (ID, PointID, ImagePath, TreatFlag, ErrorFlag, ModifyTime)
+                VALUES (?, ?, '', ?, 0, '')
+                """,
+                (point_id, point_id, treat_flag),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        backup_conn = sqlite3.connect(str(backup_db))
+        try:
+            backup_conn.execute(
+                """
+                CREATE TABLE SegmentImagesInfo (
+                    ID INTEGER PRIMARY KEY,
+                    PointID INTEGER,
+                    ImagePath VARCHAR(500),
+                    TreatFlag TINYINT DEFAULT 0,
+                    ErrorFlag TINYINT DEFAULT 0,
+                    ModifyTime VARCHAR(100)
+                )
+                """
+            )
+            backup_conn.commit()
+        finally:
+            backup_conn.close()
+
     def read_segment_treat_flags(self, root_dir: str, point_id: int = 123) -> dict[str, int]:
         flags: dict[str, int] = {}
         for db_name in ("ccwssm", "zccwssm"):
@@ -201,6 +248,18 @@ class ApiServerTests(unittest.TestCase):
             self.assertIsNotNone(row, db_name)
             flags[db_name] = int(row[0])
         return flags
+
+    def read_segment_image_paths(self, root_dir: str, db_name: str, row_id: int) -> tuple[str, str]:
+        conn = sqlite3.connect(str(Path(root_dir) / db_name))
+        try:
+            row = conn.execute(
+                "SELECT ImagePath, ModifyTime FROM SegmentImagesInfo WHERE ID = ?",
+                (row_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row, db_name)
+        return str(row[0]), str(row[1])
 
     def make_roi4_frame(self, base_value: int, roi4_value: int, seq: int) -> api_server.FrameSnapshot:
         image = np.full((520, 600, 3), base_value, dtype=np.uint8)
@@ -2539,6 +2598,48 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(stop["info"], "offline_stop_completed")
             self.assertEqual(stop["roi2_color"], "red")
             self.assertEqual(self.read_segment_treat_flags(tmp), {"ccwssm": 1, "zccwssm": 1})
+
+    def test_update_segment_images_info_succeeds_when_primary_db_matches_and_backup_row_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.create_primary_only_segment_images_db_pair(tmp, point_id=321, treat_flag=2)
+
+            api_server.update_segment_images_info(
+                tmp,
+                321,
+                r"D:\software_data\imgs\before.png",
+                r"D:\software_data\imgs\treat_after.png",
+                True,
+            )
+
+            primary_image_path, primary_modify_time = self.read_segment_image_paths(tmp, "ccwssm", 321)
+            backup_conn = sqlite3.connect(str(Path(tmp) / "zccwssm"))
+            try:
+                backup_row = backup_conn.execute(
+                    "SELECT ImagePath, ModifyTime FROM SegmentImagesInfo WHERE ID = ?",
+                    (321,),
+                ).fetchone()
+            finally:
+                backup_conn.close()
+
+            self.assertEqual(
+                primary_image_path,
+                r"D:\software_data\imgs\before.png;D:\software_data\imgs\treat_after.png;D:\software_data\imgs\treat_diff.png",
+            )
+            self.assertTrue(primary_modify_time)
+            self.assertIsNone(backup_row)
+
+    def test_update_segment_images_info_fails_when_no_database_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.create_primary_only_segment_images_db_pair(tmp, point_id=654, treat_flag=0)
+
+            with self.assertRaisesRegex(LookupError, "matched no rows"):
+                api_server.update_segment_images_info(
+                    tmp,
+                    999,
+                    r"D:\software_data\imgs\before.png",
+                    r"D:\software_data\imgs\after.png",
+                    True,
+                )
 
     def test_offline_db_update_failure_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
