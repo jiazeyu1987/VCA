@@ -1727,6 +1727,30 @@ class ApiServerTests(unittest.TestCase):
             },
         )
 
+    def test_offline_start_wait_before_capture_returns_after_first_before_frame(self):
+        frame = api_server.FrameSnapshot(
+            np.full((32, 32, 3), 7, dtype=np.uint8),
+            seq=41,
+            ts=123.456,
+        )
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
+            frame_fetcher=self.SequenceFrameSource([frame]),
+            config=api_server.OfflineConfig.default(),
+            logger=self.make_null_logger("test_offline_start_wait_before_capture_returns_after_first_before_frame"),
+        )
+
+        result = manager.handle('{"point_id": 333, "time_out": 5, "is_save": true, "wait_before_capture": true}')
+
+        self.assertEqual(result["success"], True)
+        self.assertEqual(result["info"], "offline_before_captured")
+        self.assertEqual(result["point_id"], 333)
+        self.assertEqual(result["before_frame_seq"], 41)
+        self.assertEqual(result["before_frame_index"], 1)
+        self.assertEqual(result["before_name"], api_server.format_frame_timestamp(123.456))
+
+        manager.handle('{"point_id": 333, "time_out": 5, "is_save": true}')
+
     def test_offline_switch_logs_wait_details(self):
         logger, stream = self.make_stream_logger("test_offline_switch_logs_wait_details")
         manager = api_server.OfflineSessionManager(

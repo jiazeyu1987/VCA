@@ -32,6 +32,7 @@ DEFAULT_PORT = 30415
 DEVICE_RECONNECT_FAILED_EXIT_CODE = 70
 ONLINE_PROVIDER_TIMEOUT_SECONDS = 3.0
 ONLINE_RECONNECT_TIMEOUT_SECONDS = 2.0
+OFFLINE_BEFORE_CAPTURE_ACK_TIMEOUT_SECONDS = 3.0
 EXTERNAL_RUNTIME_DIR = Path(r"D:\ocr3\resource\pywrapper")
 REQUIRED_RUNTIME_FILES = (
     "PyMobileComm.pyd",
@@ -170,6 +171,7 @@ class OfflineSession:
     received_wall_time: Optional[str] = None
     received_ts: Optional[float] = None
     received_perf_counter_ns: Optional[int] = None
+    before_captured_event: threading.Event = field(default_factory=threading.Event)
     capture_done_event: threading.Event = field(default_factory=threading.Event)
     finished_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
@@ -1938,6 +1940,7 @@ class OfflineSessionManager:
         except Exception:
             return {"success": False, "info": "invalid_time_out", "point_id": point_id}
         is_save = bool(arg_obj["is_save"])
+        wait_before_capture = bool(arg_obj.get("wait_before_capture", False))
         received_wall_time = online_wall_time()
         received_ts = time.time()
         received_perf_counter_ns = time.perf_counter_ns()
@@ -1996,6 +1999,16 @@ class OfflineSessionManager:
                 self._orphans.append(active)
                 self._active_session = None
             self._offline_point_req_count[point_key] = accepted + 1
+            if wait_before_capture:
+                return self._start_locked(
+                    point_id,
+                    duration_s,
+                    is_save,
+                    received_wall_time,
+                    received_ts,
+                    received_perf_counter_ns,
+                    wait_before_capture=True,
+                )
             return self._start_locked(
                 point_id,
                 duration_s,
@@ -2013,6 +2026,7 @@ class OfflineSessionManager:
         received_wall_time: str,
         received_ts: float,
         received_perf_counter_ns: int,
+        wait_before_capture: bool = False,
     ) -> dict:
         debug_dir = None
         if self._config.debug_save_enabled:
@@ -2055,10 +2069,52 @@ class OfflineSessionManager:
             thread_name=session.thread.name if session.thread is not None else None,
             duration_s=round(float(duration_s), 6),
             is_save=bool(is_save),
+            wait_before_capture=bool(wait_before_capture),
         )
         result = {"success": True, "info": "offline_started", "point_id": point_id}
         if debug_dir is not None:
             result["debug_dir"] = debug_dir
+        if wait_before_capture:
+            if not session.before_captured_event.wait(timeout=OFFLINE_BEFORE_CAPTURE_ACK_TIMEOUT_SECONDS):
+                session.stop_event.set()
+                self._offline_diag(
+                    "before_capture_ack_timeout",
+                    point_id=point_id,
+                    capture_source="image_matrix",
+                    timeout_s=round(float(OFFLINE_BEFORE_CAPTURE_ACK_TIMEOUT_SECONDS), 6),
+                    debug_dir=debug_dir,
+                )
+                timeout_result = {
+                    "success": False,
+                    "info": "offline_before_capture_timeout",
+                    "point_id": point_id,
+                }
+                if debug_dir is not None:
+                    timeout_result["debug_dir"] = debug_dir
+                return timeout_result
+            result = {
+                "success": True,
+                "info": "offline_before_captured",
+                "point_id": point_id,
+                "before_frame_seq": session.before_seq,
+                "before_frame_index": (
+                    int(session.initial_before_record.frame_index)
+                    if session.initial_before_record is not None
+                    else None
+                ),
+                "before_name": session.before_name,
+            }
+            if debug_dir is not None:
+                result["debug_dir"] = debug_dir
+            self._offline_diag(
+                "before_capture_ack_returned",
+                point_id=point_id,
+                capture_source="image_matrix",
+                before_frame_seq=session.before_seq,
+                before_frame_index=result["before_frame_index"],
+                before_name=session.before_name,
+                debug_dir=debug_dir,
+            )
         return result
 
     def _stop_locked(self, session: OfflineSession) -> dict:
@@ -3085,6 +3141,7 @@ class OfflineSessionManager:
                         before_gray_mean=round(float(before_gray_mean), 6),
                         roi2_before_mean=round(float(session.before_mean), 6) if session.before_mean is not None else None,
                     )
+                    session.before_captured_event.set()
                     if self._config.offline_peak_enabled and self._config.offline_peak_threshold is not None:
                         self._offline_diag(
                             "peak_threshold_initialized",
