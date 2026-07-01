@@ -10,7 +10,7 @@
   "diff_label": { "pil_font_size": 18, "pil_spacing": 2, "cv_scale": 0.34, "cv_thickness": 1, "cv_line_step": 16 },
 
   "_comment_focus_guides": "Focus guide lines on before/after/diff final images. angle_degrees is the angle between the two green lines; line_width is in pixels; y_offset_mm moves the overlay downward using provider raw depth (ultrasound depth), not focus_depth/SkinDepth.",
-  "focus_guides": { "angle_degrees": 100.0, "line_width": 3, "y_offset_mm": 1.0 },
+  "focus_guides": { "angle_degrees": 105.4, "line_width": 3, "y_offset_mm": 0 },
 
   "_comment_provider_ultrasound_depth_cache_path": "Runtime cache for the last valid provider raw depth value (ONLINE Depth). Do not store focus_depth/SkinDepth here.",
   "provider_ultrasound_depth_cache_path": "D:/software_data/provider_ultrasound_depth_cache.json",
