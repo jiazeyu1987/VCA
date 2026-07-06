@@ -65,6 +65,27 @@ class AnalyzerConfig:
     max_sequences: Optional[int]
 
 
+@dataclass(frozen=True)
+class GuiState:
+    root_dir: str
+    output_csv: str
+    per_frame_csv: str
+    settings_path: str
+    focus_point: str
+    focus_points_csv: str
+    provider_depth_mm: str
+    focus_y_offset_mm: str
+    roi2_left: str
+    roi2_right: str
+    roi2_top: str
+    roi2_bottom: str
+    difference_threshold: str
+    before_frame_index: str
+    after_strategy: str
+    include_selected_debug: bool
+    max_sequences: str
+
+
 def _fmt_float(value: Optional[float]) -> str:
     if value is None:
         return ""
@@ -145,6 +166,81 @@ def _parse_roi2_params(text: Optional[str], settings: dict) -> dict:
         if key not in payload:
             raise ValueError(f"--roi2-extension-params missing key: {key}")
     return payload
+
+
+def _optional_path(text: str) -> Optional[Path]:
+    stripped = text.strip()
+    return Path(stripped) if stripped else None
+
+
+def _optional_float(text: str, name: str) -> Optional[float]:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        return float(stripped)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
+def _optional_int(text: str, name: str) -> Optional[int]:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        return int(stripped)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _required_int(text: str, name: str) -> int:
+    value = _optional_int(text, name)
+    if value is None:
+        raise ValueError(f"{name} is required")
+    return value
+
+
+def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
+    root_text = state.root_dir.strip()
+    output_text = state.output_csv.strip()
+    if not root_text:
+        raise ValueError("root directory is required")
+    if not output_text:
+        raise ValueError("output CSV is required")
+    settings_path = _optional_path(state.settings_path)
+    settings = _load_settings(settings_path) if settings_path is not None else {}
+    roi2_params = {
+        "left": _required_int(state.roi2_left, "ROI2 left"),
+        "right": _required_int(state.roi2_right, "ROI2 right"),
+        "top": _required_int(state.roi2_top, "ROI2 top"),
+        "bottom": _required_int(state.roi2_bottom, "ROI2 bottom"),
+    }
+    threshold = _optional_float(state.difference_threshold, "difference threshold")
+    focus_y_offset = _optional_float(state.focus_y_offset_mm, "focus y-offset mm")
+    provider_depth = _optional_float(state.provider_depth_mm, "provider depth mm")
+    before_index = _required_int(state.before_frame_index, "before frame index")
+    max_sequences = _optional_int(state.max_sequences, "max sequences")
+    after_strategy = state.after_strategy.strip() or "roi2_peak"
+    if after_strategy not in {"roi2_peak", "last"}:
+        raise ValueError(f"unsupported after strategy: {after_strategy}")
+    return AnalyzerConfig(
+        root_dir=Path(root_text),
+        output_csv=Path(output_text),
+        per_frame_csv=_optional_path(state.per_frame_csv),
+        settings_path=settings_path,
+        focus_point=state.focus_point.strip() or None,
+        focus_points_csv=_optional_path(state.focus_points_csv),
+        provider_depth_mm=provider_depth,
+        focus_y_offset_mm=api_server.validate_focus_y_offset_mm(
+            focus_y_offset if focus_y_offset is not None else _settings_focus_y_offset(settings)
+        ),
+        roi2_extension_params=roi2_params,
+        difference_threshold=float(threshold if threshold is not None else _settings_difference_threshold(settings)),
+        before_frame_index=before_index,
+        after_strategy=after_strategy,
+        include_selected_debug=bool(state.include_selected_debug),
+        max_sequences=max_sequences,
+    )
 
 
 def load_focus_points_csv(path: Optional[Path]) -> dict[str, Any]:
@@ -355,6 +451,7 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     parser.add_argument("--after-strategy", choices=["roi2_peak", "last"], default="roi2_peak", help="After frame selection strategy.")
     parser.add_argument("--include-selected-debug", action="store_true", help="Include selected_*.png debug images in frame analysis.")
     parser.add_argument("--max-sequences", type=int, help="Limit analyzed sequence count for smoke runs.")
+    parser.add_argument("--gui", action="store_true", help="Open the single-file GUI instead of running CLI analysis.")
     args = parser.parse_args(argv)
 
     settings_path = Path(args.settings) if args.settings else None
@@ -388,8 +485,186 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     )
 
 
+class HemRoi2BatchAnalyzerGui:
+    def __init__(self, root):
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.root = root
+        self.tk = tk
+        self.ttk = ttk
+        self.root.title("HEM ROI2 Batch Analyzer")
+        self.root_dir = tk.StringVar(value="E:\\20260614")
+        self.output_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "summary.csv"))
+        self.per_frame_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "frames.csv"))
+        self.settings_path = tk.StringVar(value="settings")
+        self.focus_point = tk.StringVar(value="")
+        self.focus_points_csv = tk.StringVar(value="")
+        self.provider_depth_mm = tk.StringVar(value="")
+        self.focus_y_offset_mm = tk.StringVar(value=str(_settings_focus_y_offset(_load_settings(Path("settings"))) if Path("settings").exists() else 0.0))
+        settings = _load_settings(Path("settings")) if Path("settings").exists() else {}
+        roi2 = _settings_roi2_params(settings)
+        self.roi2_left = tk.StringVar(value=str(roi2["left"]))
+        self.roi2_right = tk.StringVar(value=str(roi2["right"]))
+        self.roi2_top = tk.StringVar(value=str(roi2["top"]))
+        self.roi2_bottom = tk.StringVar(value=str(roi2["bottom"]))
+        self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
+        self.before_frame_index = tk.StringVar(value="1")
+        self.after_strategy = tk.StringVar(value="roi2_peak")
+        self.include_selected_debug = tk.BooleanVar(value=False)
+        self.max_sequences = tk.StringVar(value="")
+        self.status = tk.StringVar(value="Set parameters, then run analysis.")
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        ttk = self.ttk
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main = ttk.Frame(self.root, padding=10)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(1, weight=1)
+        row = 0
+        row = self._path_row(main, row, "Sequence root", self.root_dir, "dir")
+        row = self._path_row(main, row, "Summary CSV", self.output_csv, "save_csv")
+        row = self._path_row(main, row, "Per-frame CSV", self.per_frame_csv, "save_csv")
+        row = self._path_row(main, row, "Settings JSON", self.settings_path, "file")
+        row = self._path_row(main, row, "Focus points CSV", self.focus_points_csv, "file")
+        row = self._entry_row(main, row, "Global focus point", self.focus_point, "PointF(x, y) or x,y")
+        row = self._entry_row(main, row, "Provider depth mm", self.provider_depth_mm, "Required when y-offset > 0")
+        row = self._entry_row(main, row, "Focus y-offset mm", self.focus_y_offset_mm, "")
+
+        roi = ttk.LabelFrame(main, text="ROI2 extension params", padding=8)
+        roi.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        for c in range(8):
+            roi.columnconfigure(c, weight=1)
+        for col, (label, var) in enumerate(
+            [
+                ("left", self.roi2_left),
+                ("right", self.roi2_right),
+                ("top", self.roi2_top),
+                ("bottom", self.roi2_bottom),
+            ]
+        ):
+            ttk.Label(roi, text=label).grid(row=0, column=col * 2, sticky="w", padx=(0, 4))
+            ttk.Entry(roi, textvariable=var, width=8).grid(row=0, column=col * 2 + 1, sticky="ew", padx=(0, 8))
+        row += 1
+
+        row = self._entry_row(main, row, "Difference threshold", self.difference_threshold, "")
+        row = self._entry_row(main, row, "Before frame index", self.before_frame_index, "1-based")
+
+        ttk.Label(main, text="After strategy").grid(row=row, column=0, sticky="w", pady=4)
+        strategy = ttk.Combobox(main, textvariable=self.after_strategy, values=("roi2_peak", "last"), state="readonly", width=16)
+        strategy.grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+
+        ttk.Checkbutton(main, text="Include selected_*.png debug images", variable=self.include_selected_debug).grid(
+            row=row, column=1, sticky="w", pady=4
+        )
+        row += 1
+        row = self._entry_row(main, row, "Max sequences", self.max_sequences, "Optional smoke-run limit")
+
+        buttons = ttk.Frame(main)
+        buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Button(buttons, text="Load settings defaults", command=self.load_settings_defaults).pack(side="left")
+        ttk.Button(buttons, text="Run analysis", command=self.run_analysis).pack(side="right")
+        row += 1
+
+        ttk.Label(main, textvariable=self.status, wraplength=760).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+    def _entry_row(self, parent, row: int, label: str, var, hint: str) -> int:
+        ttk = self.ttk
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(parent, text=hint).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=4)
+        return row + 1
+
+    def _path_row(self, parent, row: int, label: str, var, mode: str) -> int:
+        ttk = self.ttk
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Button(parent, text="Browse", command=lambda: self.browse_path(var, mode)).grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+        return row + 1
+
+    def browse_path(self, var, mode: str) -> None:
+        from tkinter import filedialog
+
+        if mode == "dir":
+            selected = filedialog.askdirectory(title="Select sequence root")
+        elif mode == "save_csv":
+            selected = filedialog.asksaveasfilename(title="Select CSV output", defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        else:
+            selected = filedialog.askopenfilename(title="Select file")
+        if selected:
+            var.set(selected)
+
+    def current_state(self) -> GuiState:
+        return GuiState(
+            root_dir=self.root_dir.get(),
+            output_csv=self.output_csv.get(),
+            per_frame_csv=self.per_frame_csv.get(),
+            settings_path=self.settings_path.get(),
+            focus_point=self.focus_point.get(),
+            focus_points_csv=self.focus_points_csv.get(),
+            provider_depth_mm=self.provider_depth_mm.get(),
+            focus_y_offset_mm=self.focus_y_offset_mm.get(),
+            roi2_left=self.roi2_left.get(),
+            roi2_right=self.roi2_right.get(),
+            roi2_top=self.roi2_top.get(),
+            roi2_bottom=self.roi2_bottom.get(),
+            difference_threshold=self.difference_threshold.get(),
+            before_frame_index=self.before_frame_index.get(),
+            after_strategy=self.after_strategy.get(),
+            include_selected_debug=self.include_selected_debug.get(),
+            max_sequences=self.max_sequences.get(),
+        )
+
+    def load_settings_defaults(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            settings = _load_settings(Path(self.settings_path.get().strip()))
+            roi2 = _settings_roi2_params(settings)
+            self.roi2_left.set(str(roi2["left"]))
+            self.roi2_right.set(str(roi2["right"]))
+            self.roi2_top.set(str(roi2["top"]))
+            self.roi2_bottom.set(str(roi2["bottom"]))
+            self.difference_threshold.set(str(_settings_difference_threshold(settings)))
+            self.focus_y_offset_mm.set(str(_settings_focus_y_offset(settings)))
+            self.status.set("Settings defaults loaded.")
+        except Exception as exc:
+            self.status.set("Failed to load settings.")
+            messagebox.showerror("Failed to load settings", str(exc))
+
+    def run_analysis(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            config = config_from_gui_state(self.current_state())
+            rows = analyze_root(config)
+            self.status.set(f"Completed. Analyzed {len(rows)} sequences. Summary: {config.output_csv}")
+            messagebox.showinfo("Analysis completed", f"Analyzed {len(rows)} sequences.\nSummary CSV:\n{config.output_csv}")
+        except Exception as exc:
+            self.status.set("Analysis failed.")
+            messagebox.showerror("Analysis failed", str(exc))
+
+
+def launch_gui() -> int:
+    import tkinter as tk
+
+    root = tk.Tk()
+    HemRoi2BatchAnalyzerGui(root)
+    root.mainloop()
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or argv == ["--gui"]:
+        return launch_gui()
     config = build_config_from_args(argv)
+    if "--gui" in argv:
+        return launch_gui()
     rows = analyze_root(config)
     print(f"analyzed_sequences={len(rows)}")
     print(f"summary_csv={config.output_csv}")

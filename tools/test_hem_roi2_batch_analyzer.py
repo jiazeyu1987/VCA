@@ -1,5 +1,4 @@
 import csv
-import json
 import sys
 import tempfile
 import unittest
@@ -149,6 +148,49 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "provider ultrasound depth is required"):
                 analyzer.analyze_sequence(seq, cfg, {})
+
+    def test_gui_state_builds_analyzer_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "summary.csv"
+            frames = root / "frames.csv"
+            settings = root / "settings.json"
+            settings.write_text(
+                '{"focus_guides":{"y_offset_mm":0},"peak_detect":{"difference_threshold":0.5,'
+                '"roi2_extension_params":{"left":40,"right":40,"top":50,"bottom":30}}}',
+                encoding="utf-8",
+            )
+            state = analyzer.GuiState(
+                root_dir=str(root),
+                output_csv=str(output),
+                per_frame_csv=str(frames),
+                settings_path=str(settings),
+                focus_point="PointF(300, 256)",
+                focus_points_csv="",
+                provider_depth_mm="100",
+                focus_y_offset_mm="0",
+                roi2_left="10",
+                roi2_right="11",
+                roi2_top="12",
+                roi2_bottom="13",
+                difference_threshold="2.5",
+                before_frame_index="1",
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences="5",
+            )
+
+            cfg = analyzer.config_from_gui_state(state)
+
+            self.assertEqual(cfg.root_dir, root)
+            self.assertEqual(cfg.output_csv, output)
+            self.assertEqual(cfg.per_frame_csv, frames)
+            self.assertEqual(cfg.focus_point, "PointF(300, 256)")
+            self.assertEqual(cfg.provider_depth_mm, 100.0)
+            self.assertEqual(cfg.roi2_extension_params, {"left": 10, "right": 11, "top": 12, "bottom": 13})
+            self.assertEqual(cfg.difference_threshold, 2.5)
+            self.assertEqual(cfg.after_strategy, "last")
+            self.assertEqual(cfg.max_sequences, 5)
 
 
 if __name__ == "__main__":
