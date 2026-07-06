@@ -192,6 +192,38 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(cfg.after_strategy, "last")
             self.assertEqual(cfg.max_sequences, 5)
 
+    def test_gui_state_requires_focus_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = root / "settings.json"
+            settings.write_text(
+                '{"focus_guides":{"y_offset_mm":0},"peak_detect":{"difference_threshold":0.5,'
+                '"roi2_extension_params":{"left":40,"right":40,"top":50,"bottom":30}}}',
+                encoding="utf-8",
+            )
+            state = analyzer.GuiState(
+                root_dir=str(root),
+                output_csv=str(root / "summary.csv"),
+                per_frame_csv="",
+                settings_path=str(settings),
+                focus_point="",
+                focus_points_csv="",
+                provider_depth_mm="",
+                focus_y_offset_mm="0",
+                roi2_left="40",
+                roi2_right="40",
+                roi2_top="50",
+                roi2_bottom="30",
+                difference_threshold="0.5",
+                before_frame_index="1",
+                after_strategy="roi2_peak",
+                include_selected_debug=False,
+                max_sequences="",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Global focus point or Focus points CSV is required"):
+                analyzer.config_from_gui_state(state)
+
 
 if __name__ == "__main__":
     unittest.main()

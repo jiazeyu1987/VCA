@@ -203,10 +203,14 @@ def _required_int(text: str, name: str) -> int:
 def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     root_text = state.root_dir.strip()
     output_text = state.output_csv.strip()
+    focus_point_text = state.focus_point.strip()
+    focus_points_csv = _optional_path(state.focus_points_csv)
     if not root_text:
         raise ValueError("root directory is required")
     if not output_text:
         raise ValueError("output CSV is required")
+    if not focus_point_text and focus_points_csv is None:
+        raise ValueError("Global focus point or Focus points CSV is required.")
     settings_path = _optional_path(state.settings_path)
     settings = _load_settings(settings_path) if settings_path is not None else {}
     roi2_params = {
@@ -228,8 +232,8 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         output_csv=Path(output_text),
         per_frame_csv=_optional_path(state.per_frame_csv),
         settings_path=settings_path,
-        focus_point=state.focus_point.strip() or None,
-        focus_points_csv=_optional_path(state.focus_points_csv),
+        focus_point=focus_point_text or None,
+        focus_points_csv=focus_points_csv,
         provider_depth_mm=provider_depth,
         focus_y_offset_mm=api_server.validate_focus_y_offset_mm(
             focus_y_offset if focus_y_offset is not None else _settings_focus_y_offset(settings)
@@ -529,7 +533,7 @@ class HemRoi2BatchAnalyzerGui:
         row = self._path_row(main, row, "Per-frame CSV", self.per_frame_csv, "save_csv")
         row = self._path_row(main, row, "Settings JSON", self.settings_path, "file")
         row = self._path_row(main, row, "Focus points CSV", self.focus_points_csv, "file")
-        row = self._entry_row(main, row, "Global focus point", self.focus_point, "PointF(x, y) or x,y")
+        row = self._entry_row(main, row, "Global focus point", self.focus_point, "Required if no CSV: PointF(x, y) or x,y")
         row = self._entry_row(main, row, "Provider depth mm", self.provider_depth_mm, "Required when y-offset > 0")
         row = self._entry_row(main, row, "Focus y-offset mm", self.focus_y_offset_mm, "")
 
@@ -644,7 +648,7 @@ class HemRoi2BatchAnalyzerGui:
             self.status.set(f"Completed. Analyzed {len(rows)} sequences. Summary: {config.output_csv}")
             messagebox.showinfo("Analysis completed", f"Analyzed {len(rows)} sequences.\nSummary CSV:\n{config.output_csv}")
         except Exception as exc:
-            self.status.set("Analysis failed.")
+            self.status.set(f"Analysis failed: {exc}")
             messagebox.showerror("Analysis failed", str(exc))
 
 
