@@ -27,8 +27,14 @@ AFTER_STRATEGY_LABELS = {
 AFTER_STRATEGY_VALUES = {value: label for label, value in AFTER_STRATEGY_LABELS.items()}
 PREVIEW_MAX_SIZE = (760, 460)
 PREVIEW_IMAGE_ANCHOR = "nw"
-ROI_STATS_PANEL_MIN_WIDTH = 760
+ROI_STATS_PANEL_MIN_WIDTH = 840
 ROI_STATS_CARD_COLUMNS = 2
+ROI_STATS_FONT_SIZE = 8
+ROI_STATS_ROW_PADDING = 0
+ROI_NAMES = ("ROI1", "ROI2", "ROI3", "ROI4")
+ROI_RECT_FIELDS = ("x", "y", "width", "height")
+GUI_SETTINGS_KEY = "hem_roi2_batch_analyzer"
+ROI_RECT_OVERRIDES_KEY = "roi_rect_overrides"
 ROI1_COLOR = api_server.ROI1_MARKER_COLOR
 ROI2_COLOR = api_server.ROI2_MARKER_COLOR
 ROI3_COLOR = api_server.ROI3_MARKER_COLOR
@@ -113,6 +119,7 @@ class AnalyzerConfig:
     roi3_extension_params: dict = field(default_factory=lambda: dict(ROI3_DEFAULT_PARAMS))
     roi4_rect: Optional[tuple[int, int, int, int]] = None
     roi4_bottom_region_ratio: Optional[float] = None
+    roi_rect_overrides: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -143,6 +150,7 @@ class GuiState:
     roi4_width: str = ""
     roi4_height: str = ""
     roi4_bottom_region_ratio: str = ""
+    roi_rect_inputs: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _fmt_float(value: Optional[float]) -> str:
@@ -183,6 +191,114 @@ def _load_settings(path: Optional[Path]) -> dict:
     if not isinstance(payload, dict):
         raise ValueError(f"settings file must contain a JSON object: {path}")
     return payload
+
+
+def _parse_roi_rect_payload(value: Any, label: str) -> tuple[int, int, int, int]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object with x/y/width/height")
+    missing = [field for field in ROI_RECT_FIELDS if field not in value]
+    if missing:
+        raise ValueError(f"{label} missing fields: {', '.join(missing)}")
+    x = int(value["x"])
+    y = int(value["y"])
+    width = int(value["width"])
+    height = int(value["height"])
+    if x < 0 or y < 0:
+        raise ValueError(f"{label} x/y must be >= 0")
+    if width <= 0 or height <= 0:
+        raise ValueError(f"{label} width/height must be > 0")
+    return x, y, x + width, y + height
+
+
+def _settings_roi_rect_overrides(settings: dict) -> dict[str, tuple[int, int, int, int]]:
+    tool_settings = settings.get(GUI_SETTINGS_KEY)
+    if tool_settings is None:
+        return {}
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    payload = tool_settings.get(ROI_RECT_OVERRIDES_KEY, {})
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY}.{ROI_RECT_OVERRIDES_KEY} must be an object")
+    overrides: dict[str, tuple[int, int, int, int]] = {}
+    for roi_name in ROI_NAMES:
+        if roi_name in payload:
+            overrides[roi_name] = _parse_roi_rect_payload(payload[roi_name], f"{GUI_SETTINGS_KEY}.{ROI_RECT_OVERRIDES_KEY}.{roi_name}")
+    return overrides
+
+
+def _rect_to_input_values(rect: Optional[tuple[int, int, int, int]]) -> dict[str, str]:
+    if rect is None:
+        return {field: "" for field in ROI_RECT_FIELDS}
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    return {
+        "x": str(x1),
+        "y": str(y1),
+        "width": str(x2 - x1),
+        "height": str(y2 - y1),
+    }
+
+
+def _roi_rect_from_input_values(values: dict[str, str], roi_name: str) -> Optional[tuple[int, int, int, int]]:
+    fields = [str(values.get(field, "")).strip() for field in ROI_RECT_FIELDS]
+    if all(not field for field in fields):
+        return None
+    if any(not field for field in fields):
+        raise ValueError(f"{roi_name}区域需要同时填写X、Y、宽、高，或全部留空")
+    x = _required_int(fields[0], f"{roi_name} X")
+    y = _required_int(fields[1], f"{roi_name} Y")
+    width = _required_int(fields[2], f"{roi_name}宽")
+    height = _required_int(fields[3], f"{roi_name}高")
+    if x < 0 or y < 0:
+        raise ValueError(f"{roi_name} X/Y必须>=0")
+    if width <= 0 or height <= 0:
+        raise ValueError(f"{roi_name}宽/高必须>0")
+    return x, y, x + width, y + height
+
+
+def _roi_rect_overrides_from_inputs(inputs: dict[str, dict[str, str]]) -> dict[str, tuple[int, int, int, int]]:
+    overrides: dict[str, tuple[int, int, int, int]] = {}
+    for roi_name in ROI_NAMES:
+        rect = _roi_rect_from_input_values(inputs.get(roi_name, {}), roi_name)
+        if rect is not None:
+            overrides[roi_name] = rect
+    return overrides
+
+
+def _rect_to_settings_payload(rect: tuple[int, int, int, int]) -> dict[str, int]:
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    return {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+
+
+def _validate_roi_rect_for_image(
+    rect: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    label: str,
+) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    if x1 < 0 or y1 < 0:
+        raise ValueError(f"{label} X/Y must be >= 0")
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"{label} width/height must be > 0")
+    if x2 > width or y2 > height:
+        raise ValueError(f"{label} rectangle is outside image bounds: rect={rect}, image_size={(width, height)}")
+    return x1, y1, x2, y2
+
+
+def save_roi_rect_overrides(settings_path: Path, overrides: dict[str, Optional[tuple[int, int, int, int]]]) -> None:
+    settings = _load_settings(settings_path)
+    tool_settings = settings.setdefault(GUI_SETTINGS_KEY, {})
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    persisted = {
+        roi_name: _rect_to_settings_payload(rect)
+        for roi_name, rect in overrides.items()
+        if roi_name in ROI_NAMES and rect is not None
+    }
+    tool_settings[ROI_RECT_OVERRIDES_KEY] = persisted
+    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _settings_roi_params(settings: dict, key: str, default: dict, label: str) -> dict:
@@ -364,6 +480,7 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     )
     roi4_rect = _roi4_rect_from_state(state, settings)
     roi4_bottom_region_ratio = _roi4_bottom_region_ratio_from_state(state, settings, roi4_rect)
+    roi_rect_overrides = _roi_rect_overrides_from_inputs(state.roi_rect_inputs)
     threshold = _optional_float(state.difference_threshold, "差值阈值")
     focus_y_offset = _optional_float(state.focus_y_offset_mm, "焦点y偏移mm")
     provider_depth = _optional_float(state.provider_depth_mm, "超声深度mm")
@@ -393,6 +510,7 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         roi3_extension_params=roi3_params,
         roi4_rect=roi4_rect,
         roi4_bottom_region_ratio=roi4_bottom_region_ratio,
+        roi_rect_overrides=roi_rect_overrides,
     )
 
 
@@ -707,6 +825,9 @@ def resolve_roi2_rect(
         config.provider_depth_mm,
         offline_config,
     )
+    override = config.roi_rect_overrides.get("ROI2")
+    if override is not None:
+        return offset_anchor, _validate_roi_rect_for_image(override, width, height, "ROI2")
     roi2_rect = api_server.compute_roi_region(
         (width, height),
         offset_anchor,
@@ -741,11 +862,15 @@ def resolve_roi_rects(
         config.provider_depth_mm,
         offline_config,
     )
-    roi2_rect = api_server.compute_roi_region(
-        (width, height),
-        offset_anchor,
-        config.roi2_extension_params,
-    )
+    roi2_rect = config.roi_rect_overrides.get("ROI2")
+    if roi2_rect is not None:
+        roi2_rect = _validate_roi_rect_for_image(roi2_rect, width, height, "ROI2")
+    else:
+        roi2_rect = api_server.compute_roi_region(
+            (width, height),
+            offset_anchor,
+            config.roi2_extension_params,
+        )
     if roi2_rect is None:
         raise ValueError(
             "ROI2 rectangle is outside image bounds "
@@ -753,20 +878,35 @@ def resolve_roi_rects(
         )
     roi3_rect = None
     if include_roi3:
-        roi3_rect = api_server.compute_roi_region(
-            (width, height),
-            offset_anchor,
-            config.roi3_extension_params,
-        )
+        roi3_rect = config.roi_rect_overrides.get("ROI3")
+        if roi3_rect is not None:
+            roi3_rect = _validate_roi_rect_for_image(roi3_rect, width, height, "ROI3")
+        else:
+            roi3_rect = api_server.compute_roi_region(
+                (width, height),
+                offset_anchor,
+                config.roi3_extension_params,
+            )
         if roi3_rect is None:
             raise ValueError(
                 "ROI3 rectangle is outside image bounds "
                 f"sequence_size={(width, height)} focus={anchor} offset_anchor={offset_anchor} params={config.roi3_extension_params}"
             )
-    roi4_rect = api_server.resolve_roi4_rect_for_image(offline_config, first_frame) if include_roi4 else None
+    roi4_rect = None
+    if include_roi4:
+        roi4_rect = config.roi_rect_overrides.get("ROI4")
+        if roi4_rect is not None:
+            roi4_rect = _validate_roi_rect_for_image(roi4_rect, width, height, "ROI4")
+        else:
+            roi4_rect = api_server.resolve_roi4_rect_for_image(offline_config, first_frame)
+    roi1_rect = config.roi_rect_overrides.get("ROI1")
+    if roi1_rect is not None:
+        roi1_rect = _validate_roi_rect_for_image(roi1_rect, width, height, "ROI1")
+    else:
+        roi1_rect = (0, 0, width, height)
     return {
         "offset_anchor": offset_anchor,
-        "roi1_rect": (0, 0, width, height),
+        "roi1_rect": roi1_rect,
         "roi2_rect": roi2_rect,
         "roi3_rect": roi3_rect,
         "roi4_rect": roi4_rect,
@@ -960,6 +1100,7 @@ class HemRoi2BatchAnalyzerGui:
         roi3 = _settings_roi3_params(settings)
         roi4_rect = _settings_roi4_rect(settings)
         roi4_ratio = _settings_roi4_bottom_region_ratio(settings) if roi4_rect is None else None
+        roi_rect_overrides = _settings_roi_rect_overrides(settings)
         self.roi2_left = tk.StringVar(value=str(roi2["left"]))
         self.roi2_right = tk.StringVar(value=str(roi2["right"]))
         self.roi2_top = tk.StringVar(value=str(roi2["top"]))
@@ -980,6 +1121,13 @@ class HemRoi2BatchAnalyzerGui:
         self.roi4_width = tk.StringVar(value=roi4_width)
         self.roi4_height = tk.StringVar(value=roi4_height)
         self.roi4_bottom_region_ratio = tk.StringVar(value="" if roi4_ratio is None else str(roi4_ratio))
+        self.roi_rect_vars = {
+            roi_name: {
+                field_name: tk.StringVar(value=value)
+                for field_name, value in _rect_to_input_values(roi_rect_overrides.get(roi_name)).items()
+            }
+            for roi_name in ROI_NAMES
+        }
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
         self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
@@ -1009,6 +1157,7 @@ class HemRoi2BatchAnalyzerGui:
         self._current_preview_meta: dict[str, Any] = {}
         self._photo_image = None
         self._roi_stat_vars: dict[str, dict[str, Any]] = {}
+        self._roi_rect_entry_vars: dict[str, dict[str, Any]] = {}
         self._settings_window = None
         self._preview_refresh_after_id = None
         self._preview_resize_after_id = None
@@ -1043,6 +1192,7 @@ class HemRoi2BatchAnalyzerGui:
         ttk.Checkbutton(buttons, text="显示ROI3", variable=self.show_roi3, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI4", variable=self.show_roi4, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示焦点", variable=self.show_focus, command=self.refresh_preview).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="保存ROI区域", command=self.save_roi_rect_settings).pack(side="left", padx=(12, 0))
         ttk.Label(buttons, textvariable=self.sequence_info).pack(side="right")
         self.run_button = self.analyze_button
 
@@ -1068,10 +1218,14 @@ class HemRoi2BatchAnalyzerGui:
 
     def _build_roi_stats_panel(self, parent) -> None:
         ttk = self.ttk
+        from tkinter import font as tkfont
+
         panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=8)
         panel.grid(row=1, column=1, sticky="nsew", pady=(4, 6))
         for column in range(ROI_STATS_CARD_COLUMNS):
             panel.columnconfigure(column, weight=1, uniform="roi_stats")
+        stat_font = tkfont.nametofont("TkDefaultFont").copy()
+        stat_font.configure(size=ROI_STATS_FONT_SIZE)
 
         palette = {
             "ROI1": "红色，整帧/背景区域",
@@ -1084,12 +1238,33 @@ class HemRoi2BatchAnalyzerGui:
             card = ttk.LabelFrame(panel, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
             card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0), pady=(0, 8))
             card.columnconfigure(1, weight=1)
+            card.columnconfigure(3, weight=1)
+            card.columnconfigure(5, weight=1)
+            card.columnconfigure(7, weight=1)
             panel.rowconfigure(row, weight=1)
+            rect_vars = self.roi_rect_vars[roi_name]
+            self._roi_rect_entry_vars[roi_name] = rect_vars
+            for col, (label, field_name) in enumerate((("X", "x"), ("Y", "y"), ("宽", "width"), ("高", "height"))):
+                ttk.Label(card, text=label, font=stat_font).grid(row=0, column=col * 2, sticky="w", padx=(0, 2), pady=(0, 3))
+                ttk.Entry(card, textvariable=rect_vars[field_name], width=6, font=stat_font).grid(
+                    row=0,
+                    column=col * 2 + 1,
+                    sticky="ew",
+                    padx=(0, 5),
+                    pady=(0, 3),
+                )
             values = {field: self.tk.StringVar(value="-") for field, _label in ROI_STAT_DISPLAY_FIELDS}
             self._roi_stat_vars[roi_name] = values
             for field_index, (field, label) in enumerate(ROI_STAT_DISPLAY_FIELDS):
-                ttk.Label(card, text=label).grid(row=field_index, column=0, sticky="w", pady=1)
-                ttk.Label(card, textvariable=values[field]).grid(row=field_index, column=1, sticky="e", pady=1)
+                row_index = field_index + 1
+                ttk.Label(card, text=label, font=stat_font).grid(row=row_index, column=0, columnspan=3, sticky="w", pady=ROI_STATS_ROW_PADDING)
+                ttk.Label(card, textvariable=values[field], font=stat_font).grid(
+                    row=row_index,
+                    column=3,
+                    columnspan=5,
+                    sticky="e",
+                    pady=ROI_STATS_ROW_PADDING,
+                )
 
     def _build_menu(self) -> None:
         menu = self.tk.Menu(self.root)
@@ -1307,6 +1482,9 @@ class HemRoi2BatchAnalyzerGui:
             self.roi4_height,
             self.roi4_bottom_region_ratio,
         ]
+        for roi_name in ROI_NAMES:
+            for field_name in ROI_RECT_FIELDS:
+                live_preview_vars.append(self.roi_rect_vars[roi_name][field_name])
         source_vars = [
             self.root_dir,
             self.include_selected_debug,
@@ -1375,6 +1553,37 @@ class HemRoi2BatchAnalyzerGui:
         self._step_config_key = self._config_key(config)
         self.refresh_preview()
 
+    def _roi_rect_inputs_from_vars(self) -> dict[str, dict[str, str]]:
+        return {
+            roi_name: {
+                field_name: self.roi_rect_vars[roi_name][field_name].get()
+                for field_name in ROI_RECT_FIELDS
+            }
+            for roi_name in ROI_NAMES
+        }
+
+    def save_roi_rect_settings(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            state = self.current_state()
+            settings_path = _optional_path(state.settings_path)
+            if settings_path is None:
+                raise ValueError("请先设置配置JSON路径")
+            overrides = {
+                roi_name: _roi_rect_from_input_values(state.roi_rect_inputs.get(roi_name, {}), roi_name)
+                for roi_name in ROI_NAMES
+            }
+            save_roi_rect_overrides(settings_path, overrides)
+            config = config_from_gui_state(state)
+        except Exception as exc:
+            self.status.set(f"保存ROI区域失败：{exc}")
+            messagebox.showerror("保存ROI区域失败", str(exc))
+            return
+        self._step_config_key = self._config_key(config)
+        self.refresh_preview()
+        self.status.set(f"ROI区域已保存到 {settings_path}，当前预览已刷新。")
+
     def current_state(self) -> GuiState:
         self._sync_focus_point_from_xy(strict=True)
         return GuiState(
@@ -1404,6 +1613,7 @@ class HemRoi2BatchAnalyzerGui:
             roi4_width=self.roi4_width.get(),
             roi4_height=self.roi4_height.get(),
             roi4_bottom_region_ratio=self.roi4_bottom_region_ratio.get(),
+            roi_rect_inputs=self._roi_rect_inputs_from_vars(),
         )
 
     def load_settings_defaults(self) -> None:
@@ -1437,6 +1647,11 @@ class HemRoi2BatchAnalyzerGui:
                 self.roi4_bottom_region_ratio.set("")
             self.difference_threshold.set(str(_settings_difference_threshold(settings)))
             self.focus_y_offset_mm.set(str(_settings_focus_y_offset(settings)))
+            roi_rect_overrides = _settings_roi_rect_overrides(settings)
+            for roi_name in ROI_NAMES:
+                values = _rect_to_input_values(roi_rect_overrides.get(roi_name))
+                for field_name in ROI_RECT_FIELDS:
+                    self.roi_rect_vars[roi_name][field_name].set(values[field_name])
             self.status.set("配置默认值已加载。")
         except Exception as exc:
             self.status.set(f"加载配置失败：{exc}")
@@ -1456,6 +1671,7 @@ class HemRoi2BatchAnalyzerGui:
             tuple(sorted((str(k), int(v)) for k, v in config.roi3_extension_params.items())),
             config.roi4_rect,
             config.roi4_bottom_region_ratio,
+            tuple((roi_name, tuple(rect)) for roi_name, rect in sorted(config.roi_rect_overrides.items())),
             config.difference_threshold,
             config.before_frame_index,
             config.after_strategy,

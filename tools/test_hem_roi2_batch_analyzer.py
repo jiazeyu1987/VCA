@@ -626,6 +626,10 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.roi4_width = FakeVar("")
         gui.roi4_height = FakeVar("")
         gui.roi4_bottom_region_ratio = FakeVar("")
+        gui.roi_rect_vars = {
+            roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
         gui.difference_threshold = FakeVar("0.5")
         gui.before_frame_index = FakeVar("1")
         gui.after_strategy = FakeVar("roi2_peak")
@@ -706,6 +710,60 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(positions, [(0, 0), (0, 1), (1, 0), (1, 1)])
         self.assertEqual(analyzer.PREVIEW_IMAGE_ANCHOR, "nw")
         self.assertGreaterEqual(analyzer.ROI_STATS_PANEL_MIN_WIDTH, 720)
+        self.assertLessEqual(analyzer.ROI_STATS_FONT_SIZE, 8)
+
+    def test_roi_rect_overrides_replace_algorithm_rects_for_preview(self):
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        cfg = analyzer.AnalyzerConfig(
+            root_dir=Path("."),
+            output_csv=Path("summary.csv"),
+            per_frame_csv=None,
+            settings_path=None,
+            focus_point="PointF(50, 50)",
+            focus_points_csv=None,
+            provider_depth_mm=None,
+            focus_y_offset_mm=0.0,
+            roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+            difference_threshold=0.5,
+            before_frame_index=1,
+            after_strategy="roi2_peak",
+            include_selected_debug=False,
+            max_sequences=None,
+            roi3_extension_params={"left": 5, "right": 5, "top": 10, "bottom": 20},
+            roi_rect_overrides={
+                "ROI1": (1, 2, 31, 42),
+                "ROI2": (10, 11, 30, 41),
+                "ROI3": (20, 21, 40, 51),
+                "ROI4": (30, 31, 50, 61),
+            },
+        )
+
+        meta = analyzer.resolve_roi_rects(frame, (50, 50), cfg)
+
+        self.assertEqual(meta["roi1_rect"], (1, 2, 31, 42))
+        self.assertEqual(meta["roi2_rect"], (10, 11, 30, 41))
+        self.assertEqual(meta["roi3_rect"], (20, 21, 40, 51))
+        self.assertEqual(meta["roi4_rect"], (30, 31, 50, 61))
+
+    def test_save_roi_rect_overrides_persists_tool_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            settings_path.write_text('{"peak_detect": {"difference_threshold": 0.5}}', encoding="utf-8")
+            overrides = {
+                "ROI1": (1, 2, 31, 42),
+                "ROI2": (10, 11, 30, 41),
+                "ROI3": None,
+                "ROI4": (30, 31, 50, 61),
+            }
+
+            analyzer.save_roi_rect_overrides(settings_path, overrides)
+            settings = analyzer._load_settings(settings_path)
+
+            tool_settings = settings["hem_roi2_batch_analyzer"]
+            self.assertEqual(tool_settings["roi_rect_overrides"]["ROI1"], {"x": 1, "y": 2, "width": 30, "height": 40})
+            self.assertEqual(tool_settings["roi_rect_overrides"]["ROI2"], {"x": 10, "y": 11, "width": 20, "height": 30})
+            self.assertNotIn("ROI3", tool_settings["roi_rect_overrides"])
+            self.assertEqual(analyzer._settings_roi_rect_overrides(settings)["ROI4"], (30, 31, 50, 61))
 
     def test_gui_default_maximize_uses_zoomed_state(self):
         class FakeRoot:
