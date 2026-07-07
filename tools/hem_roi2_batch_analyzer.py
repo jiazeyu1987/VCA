@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 PYWRAPPER_DIR = Path(__file__).resolve().parents[1] / "resource" / "pywrapper"
@@ -20,6 +20,12 @@ import api_server
 
 
 DEFAULT_FOCUS_POINT = "PointF(299.2863464355469, 285.9410705566406)"
+AFTER_STRATEGY_LABELS = {
+    "ROI2峰值帧": "roi2_peak",
+    "最后一帧": "last",
+}
+AFTER_STRATEGY_VALUES = {value: label for label, value in AFTER_STRATEGY_LABELS.items()}
+PREVIEW_MAX_SIZE = (760, 460)
 
 
 SUMMARY_FIELDS = [
@@ -210,27 +216,28 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     focus_point_text = state.focus_point.strip()
     focus_points_csv = _optional_path(state.focus_points_csv)
     if not root_text:
-        raise ValueError("root directory is required")
+        raise ValueError("序列根目录必填")
     if not output_text:
-        raise ValueError("output CSV is required")
+        raise ValueError("汇总CSV必填")
     if not focus_point_text and focus_points_csv is None:
-        raise ValueError("Global focus point or Focus points CSV is required.")
+        raise ValueError("必须填写全局焦点或选择焦点CSV")
     settings_path = _optional_path(state.settings_path)
     settings = _load_settings(settings_path) if settings_path is not None else {}
     roi2_params = {
-        "left": _required_int(state.roi2_left, "ROI2 left"),
-        "right": _required_int(state.roi2_right, "ROI2 right"),
-        "top": _required_int(state.roi2_top, "ROI2 top"),
-        "bottom": _required_int(state.roi2_bottom, "ROI2 bottom"),
+        "left": _required_int(state.roi2_left, "ROI2左扩展"),
+        "right": _required_int(state.roi2_right, "ROI2右扩展"),
+        "top": _required_int(state.roi2_top, "ROI2上扩展"),
+        "bottom": _required_int(state.roi2_bottom, "ROI2下扩展"),
     }
-    threshold = _optional_float(state.difference_threshold, "difference threshold")
-    focus_y_offset = _optional_float(state.focus_y_offset_mm, "focus y-offset mm")
-    provider_depth = _optional_float(state.provider_depth_mm, "provider depth mm")
-    before_index = _required_int(state.before_frame_index, "before frame index")
-    max_sequences = _optional_int(state.max_sequences, "max sequences")
-    after_strategy = state.after_strategy.strip() or "roi2_peak"
+    threshold = _optional_float(state.difference_threshold, "差值阈值")
+    focus_y_offset = _optional_float(state.focus_y_offset_mm, "焦点y偏移mm")
+    provider_depth = _optional_float(state.provider_depth_mm, "超声深度mm")
+    before_index = _required_int(state.before_frame_index, "基准帧序号")
+    max_sequences = _optional_int(state.max_sequences, "最大序列数")
+    after_strategy_text = state.after_strategy.strip() or "roi2_peak"
+    after_strategy = AFTER_STRATEGY_LABELS.get(after_strategy_text, after_strategy_text)
     if after_strategy not in {"roi2_peak", "last"}:
-        raise ValueError(f"unsupported after strategy: {after_strategy}")
+        raise ValueError(f"不支持的治疗后帧选择：{after_strategy_text}")
     return AnalyzerConfig(
         root_dir=Path(root_text),
         output_csv=Path(output_text),
@@ -304,6 +311,53 @@ def load_frame(path: Path) -> np.ndarray:
 def frame_roi2_mean(path: Path, roi2_rect: tuple[int, int, int, int]) -> float:
     frame = load_frame(path)
     return api_server.roi_gray_mean(frame, roi2_rect)
+
+
+def _scale_rect(rect: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
+    return tuple(int(round(v * scale)) for v in rect)
+
+
+def _scale_point(point: tuple[int, int], scale: float) -> tuple[int, int]:
+    return int(round(point[0] * scale)), int(round(point[1] * scale))
+
+
+def _draw_focus_cross(draw: ImageDraw.ImageDraw, point: tuple[int, int], radius: int = 7) -> None:
+    x, y = point
+    color = (160, 32, 240)
+    draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color, width=3)
+    draw.line((x - radius - 4, y, x + radius + 4, y), fill=color, width=2)
+    draw.line((x, y - radius - 4, x, y + radius + 4), fill=color, width=2)
+
+
+def render_sequence_preview_image(
+    frame_path: Path,
+    sequence_name: str,
+    config: AnalyzerConfig,
+    focus_points: dict[str, Any],
+    show_roi2: bool,
+    show_focus: bool,
+    max_size: tuple[int, int] = PREVIEW_MAX_SIZE,
+) -> tuple[Image.Image, dict[str, Any]]:
+    frame = load_frame(frame_path)
+    focus_anchor = resolve_sequence_focus(sequence_name, config, focus_points)
+    offset_anchor, roi2_rect = resolve_roi2_rect(frame, focus_anchor, config)
+    image = Image.fromarray(frame).convert("RGB")
+    original_width, original_height = image.size
+    scale = min(max_size[0] / original_width, max_size[1] / original_height, 1.0)
+    if scale < 1.0:
+        image = image.resize((int(round(original_width * scale)), int(round(original_height * scale))), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(image)
+    if show_roi2:
+        draw.rectangle(_scale_rect(roi2_rect, scale), outline=(0, 255, 0), width=3)
+    if show_focus:
+        _draw_focus_cross(draw, _scale_point(focus_anchor, scale))
+    return image, {
+        "focus_anchor": focus_anchor,
+        "offset_anchor": offset_anchor,
+        "roi2_rect": roi2_rect,
+        "scale": scale,
+        "frame_path": frame_path,
+    }
 
 
 def resolve_sequence_focus(sequence_name: str, config: AnalyzerConfig, focus_points: dict[str, Any]) -> tuple[int, int]:
@@ -508,7 +562,7 @@ class HemRoi2BatchAnalyzerGui:
         self.root = root
         self.tk = tk
         self.ttk = ttk
-        self.root.title("HEM ROI2 Batch Analyzer")
+        self.root.title("HEM ROI2 单序列可视化分析器")
         self.root_dir = tk.StringVar(value="E:\\20260614")
         self.output_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "summary.csv"))
         self.per_frame_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "frames.csv"))
@@ -525,17 +579,30 @@ class HemRoi2BatchAnalyzerGui:
         self.roi2_bottom = tk.StringVar(value=str(roi2["bottom"]))
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
-        self.after_strategy = tk.StringVar(value="roi2_peak")
+        self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
         self.include_selected_debug = tk.BooleanVar(value=False)
+        self.show_roi2 = tk.BooleanVar(value=True)
+        self.show_focus = tk.BooleanVar(value=True)
+        self.timeline_value = tk.IntVar(value=1)
+        self.sequence_info = tk.StringVar(value="未加载序列")
+        self.frame_info = tk.StringVar(value="未加载图片")
         self.max_sequences = tk.StringVar(value="")
-        self.status = tk.StringVar(value="Set parameters, then run analysis.")
+        self.status = tk.StringVar(value="请点击“加载/刷新序列”。")
         self._analysis_running = False
         self._step_config_key = None
         self._step_sequence_dirs: list[Path] = []
         self._step_next_index = 0
+        self._current_sequence_index = 0
         self._step_summary_rows: list[dict[str, str]] = []
         self._step_frame_rows: list[dict[str, str]] = []
+        self._analyzed_sequences: set[str] = set()
+        self._current_frame_paths: list[Path] = []
+        self._current_frame_index = 0
+        self._current_preview_image = None
+        self._current_preview_meta: dict[str, Any] = {}
+        self._photo_image = None
         self._build_ui()
+        self.root.after(0, self.load_sequences)
 
     def _build_ui(self) -> None:
         ttk = self.ttk
@@ -544,51 +611,82 @@ class HemRoi2BatchAnalyzerGui:
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(1, weight=1)
+        main.rowconfigure(15, weight=1)
         row = 0
-        row = self._path_row(main, row, "Sequence root", self.root_dir, "dir")
-        row = self._path_row(main, row, "Summary CSV", self.output_csv, "save_csv")
-        row = self._path_row(main, row, "Per-frame CSV", self.per_frame_csv, "save_csv")
-        row = self._path_row(main, row, "Settings JSON", self.settings_path, "file")
-        row = self._path_row(main, row, "Focus points CSV", self.focus_points_csv, "file")
-        row = self._entry_row(main, row, "Global focus point", self.focus_point, "Required if no CSV: PointF(x, y) or x,y")
-        row = self._entry_row(main, row, "Provider depth mm", self.provider_depth_mm, "Required when y-offset > 0")
-        row = self._entry_row(main, row, "Focus y-offset mm", self.focus_y_offset_mm, "")
+        row = self._path_row(main, row, "序列根目录", self.root_dir, "dir")
+        row = self._path_row(main, row, "汇总CSV", self.output_csv, "save_csv")
+        row = self._path_row(main, row, "逐帧CSV", self.per_frame_csv, "save_csv")
+        row = self._path_row(main, row, "配置JSON", self.settings_path, "file")
+        row = self._path_row(main, row, "焦点CSV", self.focus_points_csv, "file")
+        row = self._entry_row(main, row, "全局焦点", self.focus_point, "无CSV时必填：PointF(x, y) 或 x,y")
+        row = self._entry_row(main, row, "超声深度mm", self.provider_depth_mm, "y偏移>0时必填")
+        row = self._entry_row(main, row, "焦点y偏移mm", self.focus_y_offset_mm, "")
 
-        roi = ttk.LabelFrame(main, text="ROI2 extension params", padding=8)
+        roi = ttk.LabelFrame(main, text="ROI2扩展参数", padding=8)
         roi.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         for c in range(8):
             roi.columnconfigure(c, weight=1)
         for col, (label, var) in enumerate(
             [
-                ("left", self.roi2_left),
-                ("right", self.roi2_right),
-                ("top", self.roi2_top),
-                ("bottom", self.roi2_bottom),
+                ("左", self.roi2_left),
+                ("右", self.roi2_right),
+                ("上", self.roi2_top),
+                ("下", self.roi2_bottom),
             ]
         ):
             ttk.Label(roi, text=label).grid(row=0, column=col * 2, sticky="w", padx=(0, 4))
             ttk.Entry(roi, textvariable=var, width=8).grid(row=0, column=col * 2 + 1, sticky="ew", padx=(0, 8))
         row += 1
 
-        row = self._entry_row(main, row, "Difference threshold", self.difference_threshold, "")
-        row = self._entry_row(main, row, "Before frame index", self.before_frame_index, "1-based")
+        row = self._entry_row(main, row, "差值阈值", self.difference_threshold, "")
+        row = self._entry_row(main, row, "基准帧序号", self.before_frame_index, "从1开始")
 
-        ttk.Label(main, text="After strategy").grid(row=row, column=0, sticky="w", pady=4)
-        strategy = ttk.Combobox(main, textvariable=self.after_strategy, values=("roi2_peak", "last"), state="readonly", width=16)
+        ttk.Label(main, text="治疗后帧选择").grid(row=row, column=0, sticky="w", pady=4)
+        strategy = ttk.Combobox(
+            main,
+            textvariable=self.after_strategy,
+            values=tuple(AFTER_STRATEGY_LABELS.keys()),
+            state="readonly",
+            width=16,
+        )
         strategy.grid(row=row, column=1, sticky="w", pady=4)
         row += 1
 
-        ttk.Checkbutton(main, text="Include selected_*.png debug images", variable=self.include_selected_debug).grid(
+        ttk.Checkbutton(main, text="包含 selected_*.png 调试图片", variable=self.include_selected_debug).grid(
             row=row, column=1, sticky="w", pady=4
         )
         row += 1
-        row = self._entry_row(main, row, "Max sequences", self.max_sequences, "Optional smoke-run limit")
+        row = self._entry_row(main, row, "最大序列数", self.max_sequences, "可选，用于小样本试跑")
 
         buttons = ttk.Frame(main)
         buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        ttk.Button(buttons, text="Load settings defaults", command=self.load_settings_defaults).pack(side="left")
-        self.run_button = ttk.Button(buttons, text="Analyze next sequence", command=self.run_analysis)
-        self.run_button.pack(side="right")
+        ttk.Button(buttons, text="加载配置默认值", command=self.load_settings_defaults).pack(side="left")
+        ttk.Button(buttons, text="加载/刷新序列", command=self.load_sequences).pack(side="left", padx=(8, 0))
+        self.analyze_button = ttk.Button(buttons, text="分析当前序列", command=self.run_analysis)
+        self.analyze_button.pack(side="right")
+        self.next_button = ttk.Button(buttons, text="下一个序列", command=self.next_sequence)
+        self.next_button.pack(side="right", padx=(0, 8))
+        self.run_button = self.analyze_button
+        row += 1
+
+        overlay = ttk.Frame(main)
+        overlay.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 4))
+        ttk.Checkbutton(overlay, text="显示ROI2", variable=self.show_roi2, command=self.refresh_preview).pack(side="left")
+        ttk.Checkbutton(overlay, text="显示焦点", variable=self.show_focus, command=self.refresh_preview).pack(side="left", padx=(12, 0))
+        ttk.Label(overlay, textvariable=self.sequence_info).pack(side="left", padx=(20, 0))
+        row += 1
+
+        self.image_label = ttk.Label(main, text="请先加载序列", anchor="center")
+        self.image_label.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(6, 4))
+        row += 1
+
+        timeline = ttk.Frame(main)
+        timeline.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        timeline.columnconfigure(1, weight=1)
+        ttk.Label(timeline, text="时间轴").grid(row=0, column=0, sticky="w")
+        self.timeline = ttk.Scale(timeline, from_=1, to=1, orient="horizontal", command=self.on_timeline_change)
+        self.timeline.grid(row=0, column=1, sticky="ew", padx=8)
+        ttk.Label(timeline, textvariable=self.frame_info).grid(row=0, column=2, sticky="e")
         row += 1
 
         ttk.Label(main, textvariable=self.status, wraplength=760).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -604,18 +702,22 @@ class HemRoi2BatchAnalyzerGui:
         ttk = self.ttk
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
         ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Button(parent, text="Browse", command=lambda: self.browse_path(var, mode)).grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Button(parent, text="浏览", command=lambda: self.browse_path(var, mode)).grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
         return row + 1
 
     def browse_path(self, var, mode: str) -> None:
         from tkinter import filedialog
 
         if mode == "dir":
-            selected = filedialog.askdirectory(title="Select sequence root")
+            selected = filedialog.askdirectory(title="选择序列根目录")
         elif mode == "save_csv":
-            selected = filedialog.asksaveasfilename(title="Select CSV output", defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+            selected = filedialog.asksaveasfilename(
+                title="选择CSV输出文件",
+                defaultextension=".csv",
+                filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")],
+            )
         else:
-            selected = filedialog.askopenfilename(title="Select file")
+            selected = filedialog.askopenfilename(title="选择文件")
         if selected:
             var.set(selected)
 
@@ -635,7 +737,7 @@ class HemRoi2BatchAnalyzerGui:
             roi2_bottom=self.roi2_bottom.get(),
             difference_threshold=self.difference_threshold.get(),
             before_frame_index=self.before_frame_index.get(),
-            after_strategy=self.after_strategy.get(),
+            after_strategy=AFTER_STRATEGY_LABELS.get(self.after_strategy.get(), self.after_strategy.get()),
             include_selected_debug=self.include_selected_debug.get(),
             max_sequences=self.max_sequences.get(),
         )
@@ -652,10 +754,10 @@ class HemRoi2BatchAnalyzerGui:
             self.roi2_bottom.set(str(roi2["bottom"]))
             self.difference_threshold.set(str(_settings_difference_threshold(settings)))
             self.focus_y_offset_mm.set(str(_settings_focus_y_offset(settings)))
-            self.status.set("Settings defaults loaded.")
+            self.status.set("配置默认值已加载。")
         except Exception as exc:
-            self.status.set("Failed to load settings.")
-            messagebox.showerror("Failed to load settings", str(exc))
+            self.status.set(f"加载配置失败：{exc}")
+            messagebox.showerror("加载配置失败", str(exc))
 
     def _config_key(self, config: AnalyzerConfig) -> tuple:
         return (
@@ -679,8 +781,130 @@ class HemRoi2BatchAnalyzerGui:
         self._step_config_key = self._config_key(config)
         self._step_sequence_dirs = list_sequences(config.root_dir, config.max_sequences)
         self._step_next_index = 0
+        self._current_sequence_index = 0
         self._step_summary_rows = []
         self._step_frame_rows = []
+        self._analyzed_sequences = set()
+        self._current_frame_paths = []
+        self._current_frame_index = 0
+
+    def _current_sequence_dir(self) -> Optional[Path]:
+        if not self._step_sequence_dirs:
+            return None
+        if self._current_sequence_index < 0 or self._current_sequence_index >= len(self._step_sequence_dirs):
+            return None
+        return self._step_sequence_dirs[self._current_sequence_index]
+
+    def _set_sequence_status(self) -> None:
+        sequence_dir = self._current_sequence_dir()
+        total = len(self._step_sequence_dirs)
+        if sequence_dir is None:
+            self.sequence_info.set("未加载序列")
+            return
+        self.sequence_info.set(f"序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}")
+
+    def _load_current_frame_paths(self, config: AnalyzerConfig) -> None:
+        sequence_dir = self._current_sequence_dir()
+        if sequence_dir is None:
+            self._current_frame_paths = []
+            self._current_frame_index = 0
+            return
+        frame_paths = list_frame_paths(sequence_dir, config.include_selected_debug)
+        if not frame_paths:
+            raise ValueError(f"当前序列没有可显示的PNG帧：{sequence_dir}")
+        self._current_frame_paths = frame_paths
+        self._current_frame_index = 0
+        self.timeline.configure(from_=1, to=len(frame_paths))
+        self.timeline.set(1)
+
+    def _display_preview_image(self, image) -> None:
+        from PIL import ImageTk
+
+        self._current_preview_image = image
+        self._photo_image = ImageTk.PhotoImage(image)
+        self.image_label.configure(image=self._photo_image, text="")
+
+    def refresh_preview(self) -> None:
+        try:
+            config = config_from_gui_state(self.current_state())
+            sequence_dir = self._current_sequence_dir()
+            if sequence_dir is None:
+                return
+            if not self._current_frame_paths:
+                self._load_current_frame_paths(config)
+            frame_path = self._current_frame_paths[self._current_frame_index]
+            focus_points = load_focus_points_csv(config.focus_points_csv)
+            image, meta = render_sequence_preview_image(
+                frame_path,
+                sequence_dir.name,
+                config,
+                focus_points,
+                bool(self.show_roi2.get()),
+                bool(self.show_focus.get()),
+            )
+            self._current_preview_meta = meta
+            self._display_preview_image(image)
+            self._set_sequence_status()
+            self.frame_info.set(f"帧 {self._current_frame_index + 1}/{len(self._current_frame_paths)}: {frame_path.name}")
+            self.status.set(
+                f"已显示 {sequence_dir.name} 的第 {self._current_frame_index + 1} 帧。"
+                f" ROI2={_fmt_rect(meta['roi2_rect'])} 焦点={_fmt_point(meta['focus_anchor'])}"
+            )
+        except Exception as exc:
+            self.status.set(f"刷新预览失败：{exc}")
+
+    def load_sequences(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            config = config_from_gui_state(self.current_state())
+            self._reset_step_state(config)
+            if not self._step_sequence_dirs:
+                self.status.set(f"未找到子文件夹：{config.root_dir}")
+                self.image_label.configure(image="", text="未找到序列")
+                return
+            self._load_current_frame_paths(config)
+            self._set_sequence_status()
+            self.refresh_preview()
+        except Exception as exc:
+            self.status.set(f"加载序列失败：{exc}")
+            messagebox.showerror("加载序列失败", str(exc))
+
+    def on_timeline_change(self, value) -> None:
+        if not self._current_frame_paths:
+            return
+        try:
+            frame_index = int(round(float(value))) - 1
+        except Exception:
+            return
+        frame_index = max(0, min(frame_index, len(self._current_frame_paths) - 1))
+        if frame_index == self._current_frame_index:
+            return
+        self._current_frame_index = frame_index
+        self.refresh_preview()
+
+    def next_sequence(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            config = config_from_gui_state(self.current_state())
+            if self._config_key(config) != self._step_config_key:
+                self._reset_step_state(config)
+            if not self._step_sequence_dirs:
+                self.load_sequences()
+                return
+            if self._current_sequence_index + 1 >= len(self._step_sequence_dirs):
+                self.status.set("已经是最后一个序列。")
+                messagebox.showinfo("序列已结束", "已经是最后一个序列。")
+                return
+            self._current_sequence_index += 1
+            self._step_next_index = self._current_sequence_index
+            self._load_current_frame_paths(config)
+            self._set_sequence_status()
+            self.refresh_preview()
+        except Exception as exc:
+            self.status.set(f"切换序列失败：{exc}")
+            messagebox.showerror("切换序列失败", str(exc))
 
     def run_analysis(self) -> None:
         from tkinter import messagebox
@@ -688,58 +912,70 @@ class HemRoi2BatchAnalyzerGui:
         try:
             config = config_from_gui_state(self.current_state())
         except Exception as exc:
-            self.status.set(f"Analysis failed: {exc}")
-            messagebox.showerror("Analysis failed", str(exc))
+            self.status.set(f"分析失败：{exc}")
+            messagebox.showerror("分析失败", str(exc))
             return
 
         if self._analysis_running:
-            self.status.set("Analysis is already running.")
+            self.status.set("分析正在运行，请稍候。")
             return
 
         config_key = self._config_key(config)
         if config_key != self._step_config_key:
             try:
                 self._reset_step_state(config)
+                self._load_current_frame_paths(config)
+                self.refresh_preview()
             except Exception as exc:
-                self.status.set(f"Analysis failed: {exc}")
-                messagebox.showerror("Analysis failed", str(exc))
+                self.status.set(f"分析失败：{exc}")
+                messagebox.showerror("分析失败", str(exc))
                 return
 
         total = len(self._step_sequence_dirs)
         if total == 0:
-            self.status.set(f"No sequence folders found: {config.root_dir}")
+            self.status.set(f"未找到子文件夹：{config.root_dir}")
             return
-        if self._step_next_index >= total:
-            self.status.set(f"All sequences analyzed. Summary: {config.output_csv}")
-            messagebox.showinfo("Analysis completed", f"All {total} sequences have already been analyzed.\nSummary CSV:\n{config.output_csv}")
+        sequence_dir = self._current_sequence_dir()
+        if sequence_dir is None:
+            self.status.set("未选择当前序列。")
             return
 
-        sequence_index = self._step_next_index
-        sequence_dir = self._step_sequence_dirs[sequence_index]
         self._analysis_running = True
         self.run_button.state(["disabled"])
-        self.status.set(f"Analyzing {sequence_index + 1}/{total}: {sequence_dir.name}")
+        self.status.set(f"正在分析当前序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}")
 
         def finish_success(row: dict[str, str], frame_rows: list[dict[str, str]]) -> None:
+            sequence_name = row["sequence"]
+            if sequence_name in self._analyzed_sequences:
+                self._step_summary_rows = [saved for saved in self._step_summary_rows if saved["sequence"] != sequence_name]
+                self._step_frame_rows = [saved for saved in self._step_frame_rows if saved["sequence"] != sequence_name]
             self._step_summary_rows.append(row)
             self._step_frame_rows.extend(frame_rows)
-            self._step_next_index += 1
+            self._analyzed_sequences.add(sequence_name)
+            self._step_next_index = self._current_sequence_index + 1
             write_csv(config.output_csv, SUMMARY_FIELDS, self._step_summary_rows)
             if config.per_frame_csv is not None:
                 write_csv(config.per_frame_csv, FRAME_FIELDS, self._step_frame_rows)
             self._analysis_running = False
             self.run_button.state(["!disabled"])
-            remaining = total - self._step_next_index
+            color_text = "绿" if row["roi2_color"] == "green" else "红"
             self.status.set(
-                f"Completed {self._step_next_index}/{total}: {sequence_dir.name}. "
-                f"Remaining: {remaining}. Summary: {config.output_csv}"
+                f"已分析当前序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}。"
+                f" 结果={color_text} ROI2差值={row['roi2_diff']} 汇总={config.output_csv}"
+            )
+            messagebox.showinfo(
+                "当前序列分析完成",
+                f"序列：{sequence_dir.name}\n"
+                f"结果：{color_text}\n"
+                f"ROI2差值：{row['roi2_diff']}\n"
+                f"汇总CSV：{config.output_csv}",
             )
 
         def finish_error(exc: Exception) -> None:
             self._analysis_running = False
             self.run_button.state(["!disabled"])
-            self.status.set(f"Analysis failed: {exc}")
-            messagebox.showerror("Analysis failed", str(exc))
+            self.status.set(f"分析失败：{exc}")
+            messagebox.showerror("分析失败", str(exc))
 
         def worker() -> None:
             try:

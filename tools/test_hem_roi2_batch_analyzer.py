@@ -161,6 +161,39 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "provider ultrasound depth is required"):
                 analyzer.analyze_sequence(seq, cfg, {})
 
+    def test_render_sequence_preview_draws_roi2_and_focus_toggles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            frame = seq / "00001_2026-06-14_00-00-00.000_frame.png"
+            write_frame(frame, 10, size=(200, 200))
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(100, 100)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+            )
+
+            hidden, hidden_meta = analyzer.render_sequence_preview_image(frame, seq.name, cfg, {}, False, False)
+            visible, visible_meta = analyzer.render_sequence_preview_image(frame, seq.name, cfg, {}, True, True)
+
+            self.assertEqual(hidden_meta["focus_anchor"], (100, 100))
+            self.assertEqual(hidden_meta["roi2_rect"], (95, 95, 105, 105))
+            self.assertEqual(visible_meta["roi2_rect"], hidden_meta["roi2_rect"])
+            self.assertNotEqual(visible.getpixel((95, 95)), hidden.getpixel((95, 95)))
+            self.assertNotEqual(visible.getpixel((100, 100)), hidden.getpixel((100, 100)))
+
     def test_gui_state_builds_analyzer_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -204,6 +237,33 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(cfg.after_strategy, "last")
             self.assertEqual(cfg.max_sequences, 5)
 
+    def test_gui_state_maps_chinese_after_strategy_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = analyzer.GuiState(
+                root_dir=str(root),
+                output_csv=str(root / "summary.csv"),
+                per_frame_csv="",
+                settings_path="",
+                focus_point=analyzer.DEFAULT_FOCUS_POINT,
+                focus_points_csv="",
+                provider_depth_mm="100",
+                focus_y_offset_mm="0",
+                roi2_left="40",
+                roi2_right="40",
+                roi2_top="50",
+                roi2_bottom="30",
+                difference_threshold="0.5",
+                before_frame_index="1",
+                after_strategy="最后一帧",
+                include_selected_debug=False,
+                max_sequences="",
+            )
+
+            cfg = analyzer.config_from_gui_state(state)
+
+            self.assertEqual(cfg.after_strategy, "last")
+
     def test_gui_state_requires_focus_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -233,16 +293,20 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
                 max_sequences="",
             )
 
-            with self.assertRaisesRegex(ValueError, "Global focus point or Focus points CSV is required"):
+            with self.assertRaisesRegex(ValueError, "必须填写全局焦点或选择焦点CSV"):
                 analyzer.config_from_gui_state(state)
 
     def test_gui_run_analysis_returns_immediately_while_one_sequence_runs(self):
         class FakeButton:
             def __init__(self):
                 self.state_calls = []
+                self.config_calls = []
 
             def state(self, values):
                 self.state_calls.append(tuple(values))
+
+            def configure(self, **kwargs):
+                self.config_calls.append(kwargs)
 
         class FakeRoot:
             def __init__(self):
@@ -251,16 +315,48 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             def after(self, delay_ms, callback, *args):
                 self.after_calls.append((delay_ms, callback, args))
 
+        class FakeLabel:
+            def __init__(self):
+                self.configure_calls = []
+
+            def configure(self, **kwargs):
+                self.configure_calls.append(kwargs)
+
+        class FakeScale:
+            def __init__(self):
+                self.configure_calls = []
+                self.values = []
+
+            def configure(self, **kwargs):
+                self.configure_calls.append(kwargs)
+
+            def set(self, value):
+                self.values.append(value)
+
         gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
         gui.root = FakeRoot()
         gui.run_button = FakeButton()
+        gui.image_label = FakeLabel()
+        gui.timeline = FakeScale()
         gui.status = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
+        gui.sequence_info = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
+        gui.frame_info = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
+        gui.show_roi2 = type("Var", (), {"get": lambda self: True})()
+        gui.show_focus = type("Var", (), {"get": lambda self: True})()
         gui._analysis_running = False
         gui._step_config_key = None
         gui._step_sequence_dirs = []
         gui._step_next_index = 0
+        gui._current_sequence_index = 0
         gui._step_summary_rows = []
         gui._step_frame_rows = []
+        gui._analyzed_sequences = set()
+        gui._current_frame_paths = []
+        gui._current_frame_index = 0
+        gui._current_preview_image = None
+        gui._current_preview_meta = {}
+        gui._photo_image = None
+        gui._display_preview_image = lambda image: setattr(gui, "_current_preview_image", image)
         gui.current_state = lambda: analyzer.GuiState(
             root_dir=".",
             output_csv="summary.csv",
@@ -328,8 +424,12 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                (root / "seq_a").mkdir()
-                (root / "seq_b").mkdir()
+                seq_a = root / "seq_a"
+                seq_b = root / "seq_b"
+                seq_a.mkdir()
+                seq_b.mkdir()
+                write_frame(seq_a / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
+                write_frame(seq_b / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
                 gui.current_state = lambda: analyzer.GuiState(
                     root_dir=str(root),
                     output_csv=str(root / "summary.csv"),
@@ -337,7 +437,7 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
                     settings_path="",
                     focus_point=analyzer.DEFAULT_FOCUS_POINT,
                     focus_points_csv="",
-                    provider_depth_mm="",
+                    provider_depth_mm="100",
                     focus_y_offset_mm="0",
                     roi2_left="40",
                     roi2_right="40",
