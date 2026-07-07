@@ -10,11 +10,11 @@
 - [x] 扩展 ROI 统计计算与侧栏显示。
 - [x] 补充测试覆盖新 ROI 指标。
 - [x] 运行验证并记录任务结果。
-- [ ] 提交推送并发布。
+- [x] 提交推送并发布。
 
 ## 预期验证
 - `python -B -m py_compile tools\hem_roi2_batch_analyzer.py tools\test_hem_roi2_batch_analyzer.py`
 - `python -B -m unittest tools.test_hem_roi2_batch_analyzer`
 
 ## Current Status
-completed - ROI 灰度分布、阈值高亮、基线差异和 HEM 面积指标已补齐，验证通过，等待提交发布。
+completed - ROI 灰度分布、阈值高亮、基线差异和 HEM 面积指标已补齐，验证、提交、推送和发布均已完成。
