@@ -421,6 +421,28 @@ def frame_roi2_mean(path: Path, roi2_rect: tuple[int, int, int, int]) -> float:
     return api_server.roi_gray_mean(frame, roi2_rect)
 
 
+def roi_stats_for_frame(frame: np.ndarray, rect: Optional[tuple[int, int, int, int]]) -> dict[str, str]:
+    if rect is None:
+        return {
+            "rect": "",
+            "width": "",
+            "height": "",
+            "area": "",
+            "mean": "",
+        }
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    width = max(0, x2 - x1)
+    height = max(0, y2 - y1)
+    area = width * height
+    return {
+        "rect": _fmt_rect((x1, y1, x2, y2)),
+        "width": str(width),
+        "height": str(height),
+        "area": str(area),
+        "mean": _fmt_float(api_server.roi_gray_mean(frame, (x1, y1, x2, y2))),
+    }
+
+
 def _scale_rect(rect: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
     return tuple(int(round(v * scale)) for v in rect)
 
@@ -496,6 +518,12 @@ def render_sequence_preview_image(
         "focus_anchor": focus_anchor,
         "scale": scale,
         "frame_path": frame_path,
+        "roi_stats": {
+            "ROI1": roi_stats_for_frame(frame, roi_meta["roi1_rect"]),
+            "ROI2": roi_stats_for_frame(frame, roi_meta["roi2_rect"]),
+            "ROI3": roi_stats_for_frame(frame, roi_meta["roi3_rect"]),
+            "ROI4": roi_stats_for_frame(frame, roi_meta["roi4_rect"]),
+        },
     }
     meta.update(roi_meta)
     return image, meta
@@ -761,6 +789,7 @@ class HemRoi2BatchAnalyzerGui:
         self.tk = tk
         self.ttk = ttk
         self.root.title("HEM ROI2 单序列可视化分析器")
+        self._maximize_root()
         self.root_dir = tk.StringVar(value="E:\\20260614")
         self.output_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "summary.csv"))
         self.per_frame_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "frames.csv"))
@@ -825,6 +854,7 @@ class HemRoi2BatchAnalyzerGui:
         self._current_preview_image = None
         self._current_preview_meta: dict[str, Any] = {}
         self._photo_image = None
+        self._roi_stat_vars: dict[str, dict[str, Any]] = {}
         self._settings_window = None
         self._preview_refresh_after_id = None
         self._preview_resize_after_id = None
@@ -832,6 +862,9 @@ class HemRoi2BatchAnalyzerGui:
         self._build_ui()
         self._install_setting_traces()
         self.root.after(0, self.load_sequences)
+
+    def _maximize_root(self) -> None:
+        self.root.state("zoomed")
 
     def _build_ui(self) -> None:
         ttk = self.ttk
@@ -841,10 +874,11 @@ class HemRoi2BatchAnalyzerGui:
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=0, minsize=360)
         main.rowconfigure(1, weight=1)
 
         buttons = ttk.Frame(main)
-        buttons.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        buttons.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         ttk.Button(buttons, text="加载/刷新序列", command=self.load_sequences).pack(side="left")
         self.analyze_button = ttk.Button(buttons, text="分析当前序列", command=self.run_analysis)
         self.analyze_button.pack(side="left", padx=(8, 0))
@@ -858,19 +892,56 @@ class HemRoi2BatchAnalyzerGui:
         ttk.Label(buttons, textvariable=self.sequence_info).pack(side="right")
         self.run_button = self.analyze_button
 
-        self.image_label = ttk.Label(main, text="请先加载序列", anchor="center")
-        self.image_label.grid(row=1, column=0, sticky="nsew", pady=(4, 6))
+        preview_panel = ttk.Frame(main)
+        preview_panel.grid(row=1, column=0, sticky="nsew", pady=(4, 6), padx=(0, 10))
+        preview_panel.columnconfigure(0, weight=1)
+        preview_panel.rowconfigure(0, weight=1)
+        self.image_label = ttk.Label(preview_panel, text="请先加载序列", anchor="center")
+        self.image_label.grid(row=0, column=0, sticky="nsew")
         self.image_label.bind("<Configure>", self._on_preview_area_configure)
 
+        self._build_roi_stats_panel(main)
+
         timeline = ttk.Frame(main)
-        timeline.grid(row=2, column=0, sticky="ew", pady=(4, 2))
+        timeline.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 2))
         timeline.columnconfigure(1, weight=1)
         ttk.Label(timeline, text="时间轴").grid(row=0, column=0, sticky="w")
         self.timeline = ttk.Scale(timeline, from_=1, to=1, orient="horizontal", command=self.on_timeline_change)
         self.timeline.grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Label(timeline, textvariable=self.frame_info).grid(row=0, column=2, sticky="e")
 
-        ttk.Label(main, textvariable=self.status, wraplength=760).grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(main, textvariable=self.status, wraplength=1200).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+    def _build_roi_stats_panel(self, parent) -> None:
+        ttk = self.ttk
+        panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=10)
+        panel.grid(row=1, column=1, sticky="nsew", pady=(4, 6))
+        panel.columnconfigure(0, weight=1)
+        palette = {
+            "ROI1": "红色，整帧/背景区域",
+            "ROI2": "绿色，焦域ROI",
+            "ROI3": "黄色，焦域下ROI",
+            "ROI4": "橙色，HEM高亮/底部区域",
+        }
+        for row, roi_name in enumerate(("ROI1", "ROI2", "ROI3", "ROI4")):
+            card = ttk.LabelFrame(panel, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
+            card.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+            card.columnconfigure(1, weight=1)
+            values = {
+                "rect": self.tk.StringVar(value="-"),
+                "size": self.tk.StringVar(value="-"),
+                "area": self.tk.StringVar(value="-"),
+                "mean": self.tk.StringVar(value="-"),
+            }
+            self._roi_stat_vars[roi_name] = values
+            ttk.Label(card, text="位置").grid(row=0, column=0, sticky="w", pady=2)
+            ttk.Label(card, textvariable=values["rect"]).grid(row=0, column=1, sticky="e", pady=2)
+            ttk.Label(card, text="尺寸").grid(row=1, column=0, sticky="w", pady=2)
+            ttk.Label(card, textvariable=values["size"]).grid(row=1, column=1, sticky="e", pady=2)
+            ttk.Label(card, text="面积").grid(row=2, column=0, sticky="w", pady=2)
+            ttk.Label(card, textvariable=values["area"]).grid(row=2, column=1, sticky="e", pady=2)
+            ttk.Label(card, text="灰度均值").grid(row=3, column=0, sticky="w", pady=2)
+            ttk.Label(card, textvariable=values["mean"]).grid(row=3, column=1, sticky="e", pady=2)
 
     def _build_menu(self) -> None:
         menu = self.tk.Menu(self.root)
@@ -1292,6 +1363,19 @@ class HemRoi2BatchAnalyzerGui:
         self._photo_image = ImageTk.PhotoImage(image)
         self.image_label.configure(image=self._photo_image, text="")
 
+    def _update_roi_stats_panel(self, meta: dict[str, Any]) -> None:
+        stat_vars = getattr(self, "_roi_stat_vars", {})
+        stats_by_roi = meta.get("roi_stats", {})
+        for roi_name, values in stat_vars.items():
+            stats = stats_by_roi.get(roi_name) or {}
+            width = stats.get("width") or ""
+            height = stats.get("height") or ""
+            size = f"{width} × {height}" if width and height else "-"
+            values["rect"].set(stats.get("rect") or "-")
+            values["size"].set(size)
+            values["area"].set(stats.get("area") or "-")
+            values["mean"].set(stats.get("mean") or "-")
+
     def _preview_max_size(self) -> tuple[int, int]:
         try:
             width = int(self.image_label.winfo_width())
@@ -1349,6 +1433,7 @@ class HemRoi2BatchAnalyzerGui:
             )
             self._current_preview_meta = meta
             self._display_preview_image(image)
+            self._update_roi_stats_panel(meta)
             self._set_sequence_status()
             self.frame_info.set(f"帧 {self._current_frame_index + 1}/{len(self._current_frame_paths)}: {frame_path.name}")
             self.status.set(

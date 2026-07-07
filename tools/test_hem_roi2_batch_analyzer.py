@@ -270,6 +270,54 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertNotEqual(visible.getpixel((90, 80)), hidden.getpixel((90, 80)))
             self.assertNotEqual(visible.getpixel((95, 95)), hidden.getpixel((95, 95)))
 
+    def test_render_sequence_preview_returns_roi_stats_for_sidebar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            frame = seq / "00001_2026-06-14_00-00-00.000_frame.png"
+            write_frame(frame, 10, size=(200, 200))
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(100, 100)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+                roi3_extension_params={"left": 10, "right": 10, "top": 20, "bottom": 30},
+                roi4_bottom_region_ratio=0.25,
+            )
+
+            _image, meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                True,
+                False,
+                max_size=(200, 200),
+                show_roi1=True,
+                show_roi3=True,
+                show_roi4=True,
+            )
+
+            stats = meta["roi_stats"]
+            self.assertEqual(stats["ROI1"]["rect"], "0,0,200,200")
+            self.assertEqual(stats["ROI1"]["area"], "40000")
+            self.assertEqual(stats["ROI1"]["mean"], "10.000000")
+            self.assertEqual(stats["ROI2"]["width"], "10")
+            self.assertEqual(stats["ROI2"]["height"], "10")
+            self.assertEqual(stats["ROI3"]["rect"], "90,80,110,130")
+            self.assertEqual(stats["ROI4"]["rect"], "0,150,200,200")
+
     def test_render_sequence_preview_scales_up_to_available_area(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -561,6 +609,50 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.focus_y.set("130")
         gui._schedule_preview_refresh()
         self.assertEqual(calls[-1].focus_point, "PointF(120.0, 130.0)")
+
+    def test_gui_update_roi_stats_panel_sets_sidebar_values(self):
+        class FakeVar:
+            def __init__(self):
+                self.value = ""
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui._roi_stat_vars = {
+            "ROI1": {"rect": FakeVar(), "size": FakeVar(), "area": FakeVar(), "mean": FakeVar()},
+            "ROI2": {"rect": FakeVar(), "size": FakeVar(), "area": FakeVar(), "mean": FakeVar()},
+        }
+        gui._update_roi_stats_panel(
+            {
+                "roi_stats": {
+                    "ROI1": {"rect": "0,0,200,100", "width": "200", "height": "100", "area": "20000", "mean": "10.000000"},
+                    "ROI2": {"rect": "", "width": "", "height": "", "area": "", "mean": ""},
+                }
+            }
+        )
+
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["rect"].value, "0,0,200,100")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["size"].value, "200 × 100")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["area"].value, "20000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean"].value, "10.000000")
+        self.assertEqual(gui._roi_stat_vars["ROI2"]["rect"].value, "-")
+        self.assertEqual(gui._roi_stat_vars["ROI2"]["size"].value, "-")
+
+    def test_gui_default_maximize_uses_zoomed_state(self):
+        class FakeRoot:
+            def __init__(self):
+                self.states = []
+
+            def state(self, value):
+                self.states.append(value)
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.root = FakeRoot()
+
+        gui._maximize_root()
+
+        self.assertEqual(gui.root.states, ["zoomed"])
 
     def test_gui_run_analysis_returns_immediately_while_one_sequence_runs(self):
         class FakeButton:
