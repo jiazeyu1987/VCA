@@ -18,6 +18,9 @@ if str(PYWRAPPER_DIR) not in sys.path:
 import api_server
 
 
+DEFAULT_FOCUS_POINT = "PointF(299.2863464355469, 285.9410705566406)"
+
+
 SUMMARY_FIELDS = [
     "sequence",
     "status",
@@ -502,7 +505,7 @@ class HemRoi2BatchAnalyzerGui:
         self.output_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "summary.csv"))
         self.per_frame_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "frames.csv"))
         self.settings_path = tk.StringVar(value="settings")
-        self.focus_point = tk.StringVar(value="")
+        self.focus_point = tk.StringVar(value=DEFAULT_FOCUS_POINT)
         self.focus_points_csv = tk.StringVar(value="")
         self.provider_depth_mm = tk.StringVar(value="")
         self.focus_y_offset_mm = tk.StringVar(value=str(_settings_focus_y_offset(_load_settings(Path("settings"))) if Path("settings").exists() else 0.0))

@@ -19,6 +19,16 @@ def write_frame(path: Path, value: int, size=(20, 20)) -> None:
 
 
 class HemRoi2BatchAnalyzerTests(unittest.TestCase):
+    def test_default_focus_point_matches_current_algorithm_focus(self):
+        self.assertEqual(
+            analyzer.DEFAULT_FOCUS_POINT,
+            "PointF(299.2863464355469, 285.9410705566406)",
+        )
+        self.assertEqual(
+            analyzer._parse_focus_point_value(analyzer.DEFAULT_FOCUS_POINT),
+            (299, 285),
+        )
+
     def test_analyze_sequence_uses_current_roi2_rect_and_returns_green(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
