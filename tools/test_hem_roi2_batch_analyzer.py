@@ -700,6 +700,13 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(gui._roi_stat_vars["ROI2"]["rect"].value, "-")
         self.assertEqual(gui._roi_stat_vars["ROI2"]["size"].value, "-")
 
+    def test_gui_layout_uses_wide_two_column_roi_stats_and_left_preview_anchor(self):
+        positions = [analyzer.roi_stat_card_grid_position(index) for index in range(4)]
+
+        self.assertEqual(positions, [(0, 0), (0, 1), (1, 0), (1, 1)])
+        self.assertEqual(analyzer.PREVIEW_IMAGE_ANCHOR, "nw")
+        self.assertGreaterEqual(analyzer.ROI_STATS_PANEL_MIN_WIDTH, 720)
+
     def test_gui_default_maximize_uses_zoomed_state(self):
         class FakeRoot:
             def __init__(self):

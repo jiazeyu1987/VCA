@@ -26,6 +26,9 @@ AFTER_STRATEGY_LABELS = {
 }
 AFTER_STRATEGY_VALUES = {value: label for label, value in AFTER_STRATEGY_LABELS.items()}
 PREVIEW_MAX_SIZE = (760, 460)
+PREVIEW_IMAGE_ANCHOR = "nw"
+ROI_STATS_PANEL_MIN_WIDTH = 760
+ROI_STATS_CARD_COLUMNS = 2
 ROI1_COLOR = api_server.ROI1_MARKER_COLOR
 ROI2_COLOR = api_server.ROI2_MARKER_COLOR
 ROI3_COLOR = api_server.ROI3_MARKER_COLOR
@@ -56,6 +59,10 @@ ROI_STAT_DISPLAY_FIELDS = [
     ("mean_delta_pct", "较基线均值变化率"),
     ("highlight_area_delta", "较基线高亮面积差"),
 ]
+
+
+def roi_stat_card_grid_position(index: int) -> tuple[int, int]:
+    return index // ROI_STATS_CARD_COLUMNS, index % ROI_STATS_CARD_COLUMNS
 
 
 SUMMARY_FIELDS = [
@@ -1020,8 +1027,8 @@ class HemRoi2BatchAnalyzerGui:
         self.root.rowconfigure(0, weight=1)
         main = ttk.Frame(self.root, padding=10)
         main.grid(row=0, column=0, sticky="nsew")
-        main.columnconfigure(0, weight=1)
-        main.columnconfigure(1, weight=0, minsize=360)
+        main.columnconfigure(0, weight=3)
+        main.columnconfigure(1, weight=2, minsize=ROI_STATS_PANEL_MIN_WIDTH)
         main.rowconfigure(1, weight=1)
 
         buttons = ttk.Frame(main)
@@ -1043,7 +1050,7 @@ class HemRoi2BatchAnalyzerGui:
         preview_panel.grid(row=1, column=0, sticky="nsew", pady=(4, 6), padx=(0, 10))
         preview_panel.columnconfigure(0, weight=1)
         preview_panel.rowconfigure(0, weight=1)
-        self.image_label = ttk.Label(preview_panel, text="请先加载序列", anchor="center")
+        self.image_label = ttk.Label(preview_panel, text="请先加载序列", anchor=PREVIEW_IMAGE_ANCHOR)
         self.image_label.grid(row=0, column=0, sticky="nsew")
         self.image_label.bind("<Configure>", self._on_preview_area_configure)
 
@@ -1061,28 +1068,10 @@ class HemRoi2BatchAnalyzerGui:
 
     def _build_roi_stats_panel(self, parent) -> None:
         ttk = self.ttk
-        panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=0)
+        panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=8)
         panel.grid(row=1, column=1, sticky="nsew", pady=(4, 6))
-        panel.columnconfigure(0, weight=1)
-        panel.rowconfigure(0, weight=1)
-
-        canvas = self.tk.Canvas(panel, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(panel, orient="vertical", command=canvas.yview)
-        content = ttk.Frame(canvas, padding=8)
-        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        content.columnconfigure(0, weight=1)
-
-        def update_scroll_region(_event=None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def match_content_width(event) -> None:
-            canvas.itemconfigure(window_id, width=event.width)
-
-        content.bind("<Configure>", update_scroll_region)
-        canvas.bind("<Configure>", match_content_width)
+        for column in range(ROI_STATS_CARD_COLUMNS):
+            panel.columnconfigure(column, weight=1, uniform="roi_stats")
 
         palette = {
             "ROI1": "红色，整帧/背景区域",
@@ -1090,10 +1079,12 @@ class HemRoi2BatchAnalyzerGui:
             "ROI3": "黄色，焦域下ROI",
             "ROI4": "橙色，HEM高亮/底部区域",
         }
-        for row, roi_name in enumerate(("ROI1", "ROI2", "ROI3", "ROI4")):
-            card = ttk.LabelFrame(content, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
-            card.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        for index, roi_name in enumerate(("ROI1", "ROI2", "ROI3", "ROI4")):
+            row, column = roi_stat_card_grid_position(index)
+            card = ttk.LabelFrame(panel, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
+            card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0), pady=(0, 8))
             card.columnconfigure(1, weight=1)
+            panel.rowconfigure(row, weight=1)
             values = {field: self.tk.StringVar(value="-") for field, _label in ROI_STAT_DISPLAY_FIELDS}
             self._roi_stat_vars[roi_name] = values
             for field_index, (field, label) in enumerate(ROI_STAT_DISPLAY_FIELDS):
