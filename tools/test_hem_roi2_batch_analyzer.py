@@ -849,6 +849,115 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(analyzer._settings_highlight_rule(settings), highlight_rule)
             self.assertEqual(analyzer._settings_excel_output_dir(settings), Path("exports"))
 
+    def test_roi_definitions_from_preview_lock_visible_rects_when_inputs_blank(self):
+        inputs = {
+            roi_name: {field_name: "" for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        shapes = {"ROI1": "ellipse", "ROI2": "rectangle", "ROI3": "ellipse", "ROI4": "rectangle"}
+        preview_meta = {
+            "roi1_rect": (0, 0, 100, 80),
+            "roi2_rect": (20, 20, 60, 60),
+            "roi3_rect": (25, 60, 65, 90),
+            "roi4_rect": (0, 70, 100, 80),
+        }
+
+        definitions = analyzer._roi_definitions_from_inputs_or_preview(inputs, shapes, preview_meta)
+
+        self.assertEqual(definitions["ROI1"], {"shape": "ellipse", "rect": (0, 0, 100, 80)})
+        self.assertEqual(definitions["ROI2"], {"shape": "rectangle", "rect": (20, 20, 60, 60)})
+        self.assertEqual(definitions["ROI3"], {"shape": "ellipse", "rect": (25, 60, 65, 90)})
+        self.assertEqual(definitions["ROI4"], {"shape": "rectangle", "rect": (0, 70, 100, 80)})
+
+    def test_apply_roi_definitions_to_vars_fills_saved_roi_inputs(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.roi_rect_vars = {
+            roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        gui.roi_shape_vars = {roi_name: FakeVar("矩形") for roi_name in analyzer.ROI_NAMES}
+        definitions = {
+            "ROI2": {"shape": "ellipse", "rect": (20, 30, 80, 90)},
+            "ROI3": {"shape": "rectangle", "rect": (25, 70, 75, 120)},
+        }
+
+        gui._apply_roi_definitions_to_vars(definitions)
+
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI2"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "20", "y": "30", "width": "60", "height": "60"},
+        )
+        self.assertEqual(gui.roi_shape_vars["ROI2"].get(), "椭圆")
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI3"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "25", "y": "70", "width": "50", "height": "50"},
+        )
+        self.assertEqual(gui.roi_shape_vars["ROI3"].get(), "矩形")
+
+    def test_saved_preview_roi_centers_do_not_move_after_focus_changes(self):
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+        base_cfg = analyzer.AnalyzerConfig(
+            root_dir=Path("."),
+            output_csv=Path("summary.csv"),
+            per_frame_csv=None,
+            settings_path=None,
+            focus_point="PointF(50, 50)",
+            focus_points_csv=None,
+            provider_depth_mm=None,
+            focus_y_offset_mm=0.0,
+            roi2_extension_params={"left": 10, "right": 10, "top": 10, "bottom": 10},
+            difference_threshold=0.5,
+            before_frame_index=1,
+            after_strategy="roi2_peak",
+            include_selected_debug=False,
+            max_sequences=None,
+            roi3_extension_params={"left": 10, "right": 10, "top": 20, "bottom": 40},
+            roi4_bottom_region_ratio=0.3,
+        )
+        first_meta = analyzer.resolve_roi_rects(frame, (50, 50), base_cfg)
+        blank_inputs = {
+            roi_name: {field_name: "" for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        shapes = {"ROI1": "rectangle", "ROI2": "ellipse", "ROI3": "rectangle", "ROI4": "ellipse"}
+        definitions = analyzer._roi_definitions_from_inputs_or_preview(blank_inputs, shapes, first_meta)
+        locked_cfg = analyzer.AnalyzerConfig(
+            root_dir=Path("."),
+            output_csv=Path("summary.csv"),
+            per_frame_csv=None,
+            settings_path=None,
+            focus_point="PointF(80, 70)",
+            focus_points_csv=None,
+            provider_depth_mm=None,
+            focus_y_offset_mm=0.0,
+            roi2_extension_params=base_cfg.roi2_extension_params,
+            difference_threshold=0.5,
+            before_frame_index=1,
+            after_strategy="roi2_peak",
+            include_selected_debug=False,
+            max_sequences=None,
+            roi3_extension_params=base_cfg.roi3_extension_params,
+            roi_rect_overrides=analyzer._roi_rect_overrides_from_definitions(definitions),
+            roi_definitions=definitions,
+        )
+
+        changed_focus_meta = analyzer.resolve_roi_rects(frame, (80, 70), locked_cfg)
+
+        for roi_name in analyzer.ROI_NAMES:
+            key = f"{roi_name.lower()}_rect"
+            self.assertEqual(changed_focus_meta[key], first_meta[key])
+            self.assertEqual(changed_focus_meta["roi_shapes"][roi_name], shapes[roi_name])
+
     def test_export_sequence_excel_writes_roi_stats_and_histograms(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

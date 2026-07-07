@@ -341,6 +341,24 @@ def _roi_definitions_from_inputs(
     return definitions
 
 
+def _roi_definitions_from_inputs_or_preview(
+    rect_inputs: dict[str, dict[str, str]],
+    shape_inputs: dict[str, str],
+    preview_meta: Optional[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {}
+    preview_meta = preview_meta or {}
+    for roi_name in ROI_NAMES:
+        rect = _roi_rect_from_input_values(rect_inputs.get(roi_name, {}), roi_name)
+        if rect is None:
+            rect = preview_meta.get(f"{roi_name.lower()}_rect")
+        if rect is None:
+            continue
+        shape = _normalize_roi_shape(shape_inputs.get(roi_name, "rectangle"), roi_name)
+        definitions[roi_name] = {"shape": shape, "rect": tuple(int(v) for v in rect)}
+    return definitions
+
+
 def _roi_rect_overrides_from_definitions(definitions: dict[str, dict[str, Any]]) -> dict[str, tuple[int, int, int, int]]:
     return {
         roi_name: tuple(definition["rect"])
@@ -1619,7 +1637,7 @@ class HemRoi2BatchAnalyzerGui:
         ttk.Checkbutton(buttons, text="显示ROI3", variable=self.show_roi3, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI4", variable=self.show_roi4, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示焦点", variable=self.show_focus, command=self.refresh_preview).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="保存ROI/高亮设置", command=self.save_roi_rect_settings).pack(side="left", padx=(12, 0))
+        ttk.Button(buttons, text="保存ROI位置/高亮设置", command=self.save_roi_rect_settings).pack(side="left", padx=(12, 0))
         ttk.Label(buttons, textvariable=self.sequence_info).pack(side="right")
         self.run_button = self.analyze_button
 
@@ -2028,6 +2046,17 @@ class HemRoi2BatchAnalyzerGui:
             for roi_name in ROI_NAMES
         }
 
+    def _apply_roi_definitions_to_vars(self, definitions: dict[str, dict[str, Any]]) -> None:
+        for roi_name in ROI_NAMES:
+            definition = definitions.get(roi_name)
+            if not definition:
+                continue
+            values = _rect_to_input_values(definition.get("rect"))
+            for field_name in ROI_RECT_FIELDS:
+                self.roi_rect_vars[roi_name][field_name].set(values[field_name])
+            shape = _normalize_roi_shape(definition.get("shape", "rectangle"), roi_name)
+            self.roi_shape_vars[roi_name].set(ROI_SHAPE_DISPLAY[shape])
+
     def save_roi_rect_settings(self) -> None:
         from tkinter import messagebox
 
@@ -2036,6 +2065,15 @@ class HemRoi2BatchAnalyzerGui:
             settings_path = _optional_path(state.settings_path)
             if settings_path is None:
                 raise ValueError("请先设置配置JSON路径")
+            definitions = _roi_definitions_from_inputs_or_preview(
+                state.roi_rect_inputs,
+                state.roi_shape_inputs,
+                getattr(self, "_current_preview_meta", {}),
+            )
+            if not definitions:
+                raise ValueError("请先加载序列并显示ROI后再保存")
+            self._apply_roi_definitions_to_vars(definitions)
+            state = self.current_state()
             definitions = _roi_definitions_from_inputs(state.roi_rect_inputs, state.roi_shape_inputs)
             highlight_rule = _normalize_highlight_rule(
                 {
