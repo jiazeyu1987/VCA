@@ -210,6 +210,66 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertNotEqual(visible.getpixel((95, 95)), hidden.getpixel((95, 95)))
             self.assertNotEqual(visible.getpixel((100, 100)), hidden.getpixel((100, 100)))
 
+    def test_render_sequence_preview_draws_algorithm_roi1_roi3_roi4(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            frame = seq / "00001_2026-06-14_00-00-00.000_frame.png"
+            write_frame(frame, 10, size=(200, 200))
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(100, 100)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+                roi3_extension_params={"left": 10, "right": 10, "top": 20, "bottom": 30},
+                roi4_bottom_region_ratio=0.25,
+            )
+
+            hidden, _hidden_meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                False,
+                False,
+                max_size=(200, 200),
+                show_roi1=False,
+                show_roi3=False,
+                show_roi4=False,
+            )
+            visible, visible_meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                True,
+                False,
+                max_size=(200, 200),
+                show_roi1=True,
+                show_roi3=True,
+                show_roi4=True,
+            )
+
+            self.assertEqual(visible_meta["roi1_rect"], (0, 0, 200, 200))
+            self.assertEqual(visible_meta["roi2_rect"], (95, 95, 105, 105))
+            self.assertEqual(visible_meta["roi3_rect"], (90, 80, 110, 130))
+            self.assertEqual(visible_meta["roi4_rect"], (0, 150, 200, 200))
+            self.assertNotEqual(visible.getpixel((1, 1)), hidden.getpixel((1, 1)))
+            self.assertNotEqual(visible.getpixel((5, 150)), hidden.getpixel((5, 150)))
+            self.assertNotEqual(visible.getpixel((90, 80)), hidden.getpixel((90, 80)))
+            self.assertNotEqual(visible.getpixel((95, 95)), hidden.getpixel((95, 95)))
+
     def test_render_sequence_preview_scales_up_to_available_area(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -289,6 +349,79 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(cfg.difference_threshold, 2.5)
             self.assertEqual(cfg.after_strategy, "last")
             self.assertEqual(cfg.max_sequences, 5)
+            self.assertEqual(cfg.roi3_extension_params, analyzer.ROI3_DEFAULT_PARAMS)
+            self.assertIsNone(cfg.roi4_rect)
+            self.assertIsNone(cfg.roi4_bottom_region_ratio)
+
+    def test_gui_state_builds_multi_roi_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = analyzer.GuiState(
+                root_dir=str(root),
+                output_csv=str(root / "summary.csv"),
+                per_frame_csv="",
+                settings_path="",
+                focus_point="PointF(300, 256)",
+                focus_points_csv="",
+                provider_depth_mm="100",
+                focus_y_offset_mm="0",
+                roi2_left="10",
+                roi2_right="11",
+                roi2_top="12",
+                roi2_bottom="13",
+                difference_threshold="2.5",
+                before_frame_index="1",
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences="",
+                roi3_left="21",
+                roi3_right="22",
+                roi3_top="23",
+                roi3_bottom="24",
+                roi4_x="5",
+                roi4_y="6",
+                roi4_width="70",
+                roi4_height="80",
+                roi4_bottom_region_ratio="",
+            )
+
+            cfg = analyzer.config_from_gui_state(state)
+
+            self.assertEqual(cfg.roi3_extension_params, {"left": 21, "right": 22, "top": 23, "bottom": 24})
+            self.assertEqual(cfg.roi4_rect, (5, 6, 75, 86))
+            self.assertIsNone(cfg.roi4_bottom_region_ratio)
+
+    def test_gui_state_rejects_roi4_fixed_rect_and_bottom_ratio_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = analyzer.GuiState(
+                root_dir=str(root),
+                output_csv=str(root / "summary.csv"),
+                per_frame_csv="",
+                settings_path="",
+                focus_point="PointF(300, 256)",
+                focus_points_csv="",
+                provider_depth_mm="100",
+                focus_y_offset_mm="0",
+                roi2_left="10",
+                roi2_right="11",
+                roi2_top="12",
+                roi2_bottom="13",
+                difference_threshold="2.5",
+                before_frame_index="1",
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences="",
+                roi4_x="5",
+                roi4_y="6",
+                roi4_width="70",
+                roi4_height="80",
+                roi4_bottom_region_ratio="0.3",
+            )
+
+            with self.assertRaisesRegex(ValueError, "ROI4固定区域和底部高度比例不能同时填写"):
+                analyzer.config_from_gui_state(state)
+
 
     def test_gui_state_maps_chinese_after_strategy_label(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,6 +529,15 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.roi2_right = FakeVar("5")
         gui.roi2_top = FakeVar("5")
         gui.roi2_bottom = FakeVar("5")
+        gui.roi3_left = FakeVar("5")
+        gui.roi3_right = FakeVar("5")
+        gui.roi3_top = FakeVar("5")
+        gui.roi3_bottom = FakeVar("5")
+        gui.roi4_x = FakeVar("")
+        gui.roi4_y = FakeVar("")
+        gui.roi4_width = FakeVar("")
+        gui.roi4_height = FakeVar("")
+        gui.roi4_bottom_region_ratio = FakeVar("")
         gui.difference_threshold = FakeVar("0.5")
         gui.before_frame_index = FakeVar("1")
         gui.after_strategy = FakeVar("roi2_peak")
@@ -465,7 +607,10 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.status = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
         gui.sequence_info = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
         gui.frame_info = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
+        gui.show_roi1 = type("Var", (), {"get": lambda self: True})()
         gui.show_roi2 = type("Var", (), {"get": lambda self: True})()
+        gui.show_roi3 = type("Var", (), {"get": lambda self: False})()
+        gui.show_roi4 = type("Var", (), {"get": lambda self: False})()
         gui.show_focus = type("Var", (), {"get": lambda self: True})()
         gui._analysis_running = False
         gui._step_config_key = None

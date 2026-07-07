@@ -4,7 +4,7 @@ import json
 import re
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -26,6 +26,13 @@ AFTER_STRATEGY_LABELS = {
 }
 AFTER_STRATEGY_VALUES = {value: label for label, value in AFTER_STRATEGY_LABELS.items()}
 PREVIEW_MAX_SIZE = (760, 460)
+ROI1_COLOR = api_server.ROI1_MARKER_COLOR
+ROI2_COLOR = api_server.ROI2_MARKER_COLOR
+ROI3_COLOR = api_server.ROI3_MARKER_COLOR
+ROI4_COLOR = api_server.ROI4_MARKER_COLOR
+FOCUS_COLOR = api_server.FOCUS_MARKER_COLOR
+ROI2_DEFAULT_PARAMS = {"left": 40, "right": 40, "top": 50, "bottom": 30}
+ROI3_DEFAULT_PARAMS = {"left": 30, "right": 30, "top": 50, "bottom": 100}
 
 
 SUMMARY_FIELDS = [
@@ -73,6 +80,9 @@ class AnalyzerConfig:
     after_strategy: str
     include_selected_debug: bool
     max_sequences: Optional[int]
+    roi3_extension_params: dict = field(default_factory=lambda: dict(ROI3_DEFAULT_PARAMS))
+    roi4_rect: Optional[tuple[int, int, int, int]] = None
+    roi4_bottom_region_ratio: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +104,15 @@ class GuiState:
     after_strategy: str
     include_selected_debug: bool
     max_sequences: str
+    roi3_left: str = ""
+    roi3_right: str = ""
+    roi3_top: str = ""
+    roi3_bottom: str = ""
+    roi4_x: str = ""
+    roi4_y: str = ""
+    roi4_width: str = ""
+    roi4_height: str = ""
+    roi4_bottom_region_ratio: str = ""
 
 
 def _fmt_float(value: Optional[float]) -> str:
@@ -136,16 +155,44 @@ def _load_settings(path: Optional[Path]) -> dict:
     return payload
 
 
-def _settings_roi2_params(settings: dict) -> dict:
+def _settings_roi_params(settings: dict, key: str, default: dict, label: str) -> dict:
     peak = settings.get("peak_detect")
     if not isinstance(peak, dict):
-        return {"left": 40, "right": 40, "top": 50, "bottom": 30}
-    roi2 = peak.get("roi2_extension_params")
-    if roi2 is None:
-        return {"left": 40, "right": 40, "top": 50, "bottom": 30}
-    if not isinstance(roi2, dict):
-        raise ValueError("settings.peak_detect.roi2_extension_params must be an object")
-    return dict(roi2)
+        return dict(default)
+    roi = peak.get(key)
+    if roi is None:
+        return dict(default)
+    if not isinstance(roi, dict):
+        raise ValueError(f"settings.peak_detect.{key} must be an object")
+    for param in ("left", "right", "top", "bottom"):
+        if param not in roi:
+            raise ValueError(f"settings.peak_detect.{key}.{param} is required")
+    return {param: int(roi[param]) for param in ("left", "right", "top", "bottom")}
+
+
+def _settings_roi2_params(settings: dict) -> dict:
+    return _settings_roi_params(settings, "roi2_extension_params", ROI2_DEFAULT_PARAMS, "ROI2")
+
+
+def _settings_roi3_params(settings: dict) -> dict:
+    return _settings_roi_params(settings, "roi3_extension_params", ROI3_DEFAULT_PARAMS, "ROI3")
+
+
+def _settings_roi4_rect(settings: dict) -> Optional[tuple[int, int, int, int]]:
+    peak = settings.get("peak_detect")
+    if not isinstance(peak, dict):
+        return None
+    return api_server.parse_roi4_rect(peak)
+
+
+def _settings_roi4_bottom_region_ratio(settings: dict) -> Optional[float]:
+    peak = settings.get("peak_detect")
+    if not isinstance(peak, dict):
+        return None
+    roi4_rect = api_server.parse_roi4_rect(peak)
+    selector = peak.get("roi4_after_selector")
+    selector_enabled = bool(selector.get("enabled", False)) if isinstance(selector, dict) else False
+    return api_server.parse_roi4_bottom_region_ratio(peak, selector_enabled, roi4_rect is not None)
 
 
 def _settings_difference_threshold(settings: dict) -> float:
@@ -210,6 +257,52 @@ def _required_int(text: str, name: str) -> int:
     return value
 
 
+def _roi_params_from_state(
+    left: str,
+    right: str,
+    top: str,
+    bottom: str,
+    label: str,
+    default_params: dict,
+) -> dict:
+    values = [left, right, top, bottom]
+    if all(not str(value).strip() for value in values):
+        return dict(default_params)
+    return {
+        "left": _required_int(left, f"{label}左扩展"),
+        "right": _required_int(right, f"{label}右扩展"),
+        "top": _required_int(top, f"{label}上扩展"),
+        "bottom": _required_int(bottom, f"{label}下扩展"),
+    }
+
+
+def _roi4_rect_from_state(state: GuiState, settings: dict) -> Optional[tuple[int, int, int, int]]:
+    fields = [state.roi4_x, state.roi4_y, state.roi4_width, state.roi4_height]
+    if all(not str(value).strip() for value in fields):
+        return _settings_roi4_rect(settings)
+    if any(not str(value).strip() for value in fields):
+        raise ValueError("ROI4固定区域需要同时填写X、Y、宽、高，或全部留空")
+    x = _required_int(state.roi4_x, "ROI4 X")
+    y = _required_int(state.roi4_y, "ROI4 Y")
+    width = _required_int(state.roi4_width, "ROI4宽")
+    height = _required_int(state.roi4_height, "ROI4高")
+    if x < 0 or y < 0:
+        raise ValueError("ROI4固定区域X/Y必须>=0")
+    if width <= 0 or height <= 0:
+        raise ValueError("ROI4固定区域宽/高必须>0")
+    return x, y, x + width, y + height
+
+
+def _roi4_bottom_region_ratio_from_state(state: GuiState, settings: dict, roi4_rect: Optional[tuple[int, int, int, int]]) -> Optional[float]:
+    if state.roi4_bottom_region_ratio.strip():
+        if roi4_rect is not None:
+            raise ValueError("ROI4固定区域和底部高度比例不能同时填写")
+        return api_server.validate_roi4_bottom_region_ratio(state.roi4_bottom_region_ratio)
+    if roi4_rect is not None:
+        return None
+    return _settings_roi4_bottom_region_ratio(settings)
+
+
 def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     root_text = state.root_dir.strip()
     output_text = state.output_csv.strip()
@@ -223,12 +316,24 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         raise ValueError("必须填写全局焦点或选择焦点CSV")
     settings_path = _optional_path(state.settings_path)
     settings = _load_settings(settings_path) if settings_path is not None else {}
-    roi2_params = {
-        "left": _required_int(state.roi2_left, "ROI2左扩展"),
-        "right": _required_int(state.roi2_right, "ROI2右扩展"),
-        "top": _required_int(state.roi2_top, "ROI2上扩展"),
-        "bottom": _required_int(state.roi2_bottom, "ROI2下扩展"),
-    }
+    roi2_params = _roi_params_from_state(
+        state.roi2_left,
+        state.roi2_right,
+        state.roi2_top,
+        state.roi2_bottom,
+        "ROI2",
+        _settings_roi2_params(settings),
+    )
+    roi3_params = _roi_params_from_state(
+        state.roi3_left,
+        state.roi3_right,
+        state.roi3_top,
+        state.roi3_bottom,
+        "ROI3",
+        _settings_roi3_params(settings),
+    )
+    roi4_rect = _roi4_rect_from_state(state, settings)
+    roi4_bottom_region_ratio = _roi4_bottom_region_ratio_from_state(state, settings, roi4_rect)
     threshold = _optional_float(state.difference_threshold, "差值阈值")
     focus_y_offset = _optional_float(state.focus_y_offset_mm, "焦点y偏移mm")
     provider_depth = _optional_float(state.provider_depth_mm, "超声深度mm")
@@ -255,6 +360,9 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         after_strategy=after_strategy,
         include_selected_debug=bool(state.include_selected_debug),
         max_sequences=max_sequences,
+        roi3_extension_params=roi3_params,
+        roi4_rect=roi4_rect,
+        roi4_bottom_region_ratio=roi4_bottom_region_ratio,
     )
 
 
@@ -323,10 +431,25 @@ def _scale_point(point: tuple[int, int], scale: float) -> tuple[int, int]:
 
 def _draw_focus_cross(draw: ImageDraw.ImageDraw, point: tuple[int, int], radius: int = 7) -> None:
     x, y = point
-    color = (160, 32, 240)
+    color = FOCUS_COLOR
     draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color, width=3)
     draw.line((x - radius - 4, y, x + radius + 4, y), fill=color, width=2)
     draw.line((x, y - radius - 4, x, y + radius + 4), fill=color, width=2)
+
+
+def _draw_scaled_rect(
+    draw: ImageDraw.ImageDraw,
+    rect: tuple[int, int, int, int],
+    scale: float,
+    color: tuple[int, int, int],
+    width: int,
+    label: str,
+) -> None:
+    x1, y1, x2, y2 = _scale_rect(rect, scale)
+    x2 = max(x1 + 1, x2 - 1)
+    y2 = max(y1 + 1, y2 - 1)
+    draw.rectangle((x1, y1, x2, y2), outline=color, width=width)
+    draw.text((x1 + 4, y1 + 4), label, fill=color)
 
 
 def render_sequence_preview_image(
@@ -337,10 +460,19 @@ def render_sequence_preview_image(
     show_roi2: bool,
     show_focus: bool,
     max_size: tuple[int, int] = PREVIEW_MAX_SIZE,
+    show_roi1: bool = False,
+    show_roi3: bool = False,
+    show_roi4: bool = False,
 ) -> tuple[Image.Image, dict[str, Any]]:
     frame = load_frame(frame_path)
     focus_anchor = resolve_sequence_focus(sequence_name, config, focus_points)
-    offset_anchor, roi2_rect = resolve_roi2_rect(frame, focus_anchor, config)
+    roi_meta = resolve_roi_rects(
+        frame,
+        focus_anchor,
+        config,
+        include_roi3=show_roi3,
+        include_roi4=show_roi4,
+    )
     image = Image.fromarray(frame).convert("RGB")
     original_width, original_height = image.size
     max_width = max(1, int(max_size[0]))
@@ -350,17 +482,23 @@ def render_sequence_preview_image(
         image = image.resize((int(round(original_width * scale)), int(round(original_height * scale))), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
     overlay_width = max(2, int(round(3 * scale)))
+    if show_roi1:
+        _draw_scaled_rect(draw, roi_meta["roi1_rect"], scale, ROI1_COLOR, overlay_width, "ROI1")
+    if show_roi4 and roi_meta["roi4_rect"] is not None:
+        _draw_scaled_rect(draw, roi_meta["roi4_rect"], scale, ROI4_COLOR, overlay_width, "ROI4")
+    if show_roi3:
+        _draw_scaled_rect(draw, roi_meta["roi3_rect"], scale, ROI3_COLOR, overlay_width, "ROI3")
     if show_roi2:
-        draw.rectangle(_scale_rect(roi2_rect, scale), outline=(0, 255, 0), width=overlay_width)
+        _draw_scaled_rect(draw, roi_meta["roi2_rect"], scale, ROI2_COLOR, overlay_width, "ROI2")
     if show_focus:
         _draw_focus_cross(draw, _scale_point(focus_anchor, scale), radius=max(7, int(round(7 * scale))))
-    return image, {
+    meta = {
         "focus_anchor": focus_anchor,
-        "offset_anchor": offset_anchor,
-        "roi2_rect": roi2_rect,
         "scale": scale,
         "frame_path": frame_path,
     }
+    meta.update(roi_meta)
+    return image, meta
 
 
 def resolve_sequence_focus(sequence_name: str, config: AnalyzerConfig, focus_points: dict[str, Any]) -> tuple[int, int]:
@@ -398,6 +536,59 @@ def resolve_roi2_rect(
             f"sequence_size={(width, height)} focus={anchor} offset_anchor={offset_anchor} params={config.roi2_extension_params}"
         )
     return offset_anchor, roi2_rect
+
+
+def resolve_roi_rects(
+    first_frame: np.ndarray,
+    anchor: tuple[int, int],
+    config: AnalyzerConfig,
+    include_roi3: bool = True,
+    include_roi4: bool = True,
+) -> dict[str, Any]:
+    height, width = first_frame.shape[:2]
+    offline_config = api_server.OfflineConfig(
+        roi2_extension_params=dict(config.roi2_extension_params),
+        roi3_extension_params=dict(config.roi3_extension_params),
+        roi4_rect=config.roi4_rect,
+        roi4_bottom_region_ratio=config.roi4_bottom_region_ratio,
+        focus_y_offset_mm=float(config.focus_y_offset_mm),
+    )
+    offset_anchor = api_server.resolve_offset_focus_anchor(
+        (width, height),
+        anchor,
+        config.provider_depth_mm,
+        offline_config,
+    )
+    roi2_rect = api_server.compute_roi_region(
+        (width, height),
+        offset_anchor,
+        config.roi2_extension_params,
+    )
+    if roi2_rect is None:
+        raise ValueError(
+            "ROI2 rectangle is outside image bounds "
+            f"sequence_size={(width, height)} focus={anchor} offset_anchor={offset_anchor} params={config.roi2_extension_params}"
+        )
+    roi3_rect = None
+    if include_roi3:
+        roi3_rect = api_server.compute_roi_region(
+            (width, height),
+            offset_anchor,
+            config.roi3_extension_params,
+        )
+        if roi3_rect is None:
+            raise ValueError(
+                "ROI3 rectangle is outside image bounds "
+                f"sequence_size={(width, height)} focus={anchor} offset_anchor={offset_anchor} params={config.roi3_extension_params}"
+            )
+    roi4_rect = api_server.resolve_roi4_rect_for_image(offline_config, first_frame) if include_roi4 else None
+    return {
+        "offset_anchor": offset_anchor,
+        "roi1_rect": (0, 0, width, height),
+        "roi2_rect": roi2_rect,
+        "roi3_rect": roi3_rect,
+        "roi4_rect": roi4_rect,
+    }
 
 
 def choose_after_index(frame_means: list[float], before_index_zero_based: int, strategy: str) -> int:
@@ -534,6 +725,7 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         else _settings_focus_y_offset(settings)
     )
     roi2_params = _parse_roi2_params(args.roi2_extension_params, settings)
+    roi4_rect = _settings_roi4_rect(settings)
     difference_threshold = (
         float(args.difference_threshold)
         if args.difference_threshold is not None
@@ -554,6 +746,9 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         after_strategy=args.after_strategy,
         include_selected_debug=bool(args.include_selected_debug),
         max_sequences=args.max_sequences,
+        roi3_extension_params=_settings_roi3_params(settings),
+        roi4_rect=roi4_rect,
+        roi4_bottom_region_ratio=_settings_roi4_bottom_region_ratio(settings) if roi4_rect is None else None,
     )
 
 
@@ -579,15 +774,37 @@ class HemRoi2BatchAnalyzerGui:
         self.focus_y_offset_mm = tk.StringVar(value=str(_settings_focus_y_offset(_load_settings(Path("settings"))) if Path("settings").exists() else 0.0))
         settings = _load_settings(Path("settings")) if Path("settings").exists() else {}
         roi2 = _settings_roi2_params(settings)
+        roi3 = _settings_roi3_params(settings)
+        roi4_rect = _settings_roi4_rect(settings)
+        roi4_ratio = _settings_roi4_bottom_region_ratio(settings) if roi4_rect is None else None
         self.roi2_left = tk.StringVar(value=str(roi2["left"]))
         self.roi2_right = tk.StringVar(value=str(roi2["right"]))
         self.roi2_top = tk.StringVar(value=str(roi2["top"]))
         self.roi2_bottom = tk.StringVar(value=str(roi2["bottom"]))
+        self.roi3_left = tk.StringVar(value=str(roi3["left"]))
+        self.roi3_right = tk.StringVar(value=str(roi3["right"]))
+        self.roi3_top = tk.StringVar(value=str(roi3["top"]))
+        self.roi3_bottom = tk.StringVar(value=str(roi3["bottom"]))
+        if roi4_rect is None:
+            roi4_x = roi4_y = roi4_width = roi4_height = ""
+        else:
+            roi4_x = str(roi4_rect[0])
+            roi4_y = str(roi4_rect[1])
+            roi4_width = str(roi4_rect[2] - roi4_rect[0])
+            roi4_height = str(roi4_rect[3] - roi4_rect[1])
+        self.roi4_x = tk.StringVar(value=roi4_x)
+        self.roi4_y = tk.StringVar(value=roi4_y)
+        self.roi4_width = tk.StringVar(value=roi4_width)
+        self.roi4_height = tk.StringVar(value=roi4_height)
+        self.roi4_bottom_region_ratio = tk.StringVar(value="" if roi4_ratio is None else str(roi4_ratio))
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
         self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
         self.include_selected_debug = tk.BooleanVar(value=False)
+        self.show_roi1 = tk.BooleanVar(value=True)
         self.show_roi2 = tk.BooleanVar(value=True)
+        self.show_roi3 = tk.BooleanVar(value=True)
+        self.show_roi4 = tk.BooleanVar(value=True)
         self.show_focus = tk.BooleanVar(value=True)
         self.timeline_value = tk.IntVar(value=1)
         self.sequence_info = tk.StringVar(value="未加载序列")
@@ -633,7 +850,10 @@ class HemRoi2BatchAnalyzerGui:
         self.analyze_button.pack(side="left", padx=(8, 0))
         self.next_button = ttk.Button(buttons, text="下一个序列", command=self.next_sequence)
         self.next_button.pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(buttons, text="显示ROI2", variable=self.show_roi2, command=self.refresh_preview).pack(side="left", padx=(20, 0))
+        ttk.Checkbutton(buttons, text="显示ROI1", variable=self.show_roi1, command=self.refresh_preview).pack(side="left", padx=(20, 0))
+        ttk.Checkbutton(buttons, text="显示ROI2", variable=self.show_roi2, command=self.refresh_preview).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(buttons, text="显示ROI3", variable=self.show_roi3, command=self.refresh_preview).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(buttons, text="显示ROI4", variable=self.show_roi4, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示焦点", variable=self.show_focus, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Label(buttons, textvariable=self.sequence_info).pack(side="right")
         self.run_button = self.analyze_button
@@ -719,8 +939,45 @@ class HemRoi2BatchAnalyzerGui:
             row=1, column=0, columnspan=8, sticky="w", pady=(4, 0)
         )
 
+        roi3 = ttk.LabelFrame(content, text="ROI3扩展参数（黄色，焦域下方区域）", padding=8)
+        roi3.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        for col in range(8):
+            roi3.columnconfigure(col, weight=1)
+        for col, (label, var) in enumerate(
+            [
+                ("左", self.roi3_left),
+                ("右", self.roi3_right),
+                ("上", self.roi3_top),
+                ("下", self.roi3_bottom),
+            ]
+        ):
+            ttk.Label(roi3, text=label).grid(row=0, column=col * 2, sticky="w", padx=(0, 4), pady=4)
+            ttk.Entry(roi3, textvariable=var, width=8).grid(row=0, column=col * 2 + 1, sticky="ew", padx=(0, 8), pady=4)
+        ttk.Label(roi3, text="黄框与当前算法 peak_detect.roi3_extension_params 一致，随焦点/偏移锚点联动。").grid(
+            row=1, column=0, columnspan=8, sticky="w", pady=(4, 0)
+        )
+
+        roi4 = ttk.LabelFrame(content, text="ROI4区域（橙色，高亮候选/底部区域）", padding=8)
+        roi4.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        for col in range(8):
+            roi4.columnconfigure(col, weight=1)
+        for col, (label, var) in enumerate(
+            [
+                ("X", self.roi4_x),
+                ("Y", self.roi4_y),
+                ("宽", self.roi4_width),
+                ("高", self.roi4_height),
+            ]
+        ):
+            ttk.Label(roi4, text=label).grid(row=0, column=col * 2, sticky="w", padx=(0, 4), pady=4)
+            ttk.Entry(roi4, textvariable=var, width=8).grid(row=0, column=col * 2 + 1, sticky="ew", padx=(0, 8), pady=4)
+        self._entry_row(roi4, 1, "底部高度比例", self.roi4_bottom_region_ratio, "固定区域留空时生效，当前默认0.3")
+        ttk.Label(roi4, text="固定区域优先；X/Y/宽/高全部留空时，按底部高度比例生成ROI4。").grid(
+            row=2, column=0, columnspan=8, sticky="w", pady=(4, 0)
+        )
+
         analysis = ttk.LabelFrame(content, text="分析参数", padding=8)
-        analysis.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        analysis.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         analysis.columnconfigure(1, weight=1)
         row = self._entry_row(analysis, 0, "差值阈值", self.difference_threshold, "")
         row = self._entry_row(analysis, row, "基准帧序号", self.before_frame_index, "从1开始")
@@ -741,7 +998,7 @@ class HemRoi2BatchAnalyzerGui:
         self._entry_row(analysis, row, "最大序列数", self.max_sequences, "可选，用于小样本试跑")
 
         actions = ttk.Frame(content)
-        actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        actions.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="应用并刷新", command=self.apply_settings_changes).pack(side="right")
         ttk.Button(actions, text="关闭", command=win.destroy).pack(side="right", padx=(0, 8))
         win.protocol("WM_DELETE_WINDOW", win.destroy)
@@ -821,6 +1078,15 @@ class HemRoi2BatchAnalyzerGui:
             self.roi2_right,
             self.roi2_top,
             self.roi2_bottom,
+            self.roi3_left,
+            self.roi3_right,
+            self.roi3_top,
+            self.roi3_bottom,
+            self.roi4_x,
+            self.roi4_y,
+            self.roi4_width,
+            self.roi4_height,
+            self.roi4_bottom_region_ratio,
         ]
         source_vars = [
             self.root_dir,
@@ -910,6 +1176,15 @@ class HemRoi2BatchAnalyzerGui:
             after_strategy=AFTER_STRATEGY_LABELS.get(self.after_strategy.get(), self.after_strategy.get()),
             include_selected_debug=self.include_selected_debug.get(),
             max_sequences=self.max_sequences.get(),
+            roi3_left=self.roi3_left.get(),
+            roi3_right=self.roi3_right.get(),
+            roi3_top=self.roi3_top.get(),
+            roi3_bottom=self.roi3_bottom.get(),
+            roi4_x=self.roi4_x.get(),
+            roi4_y=self.roi4_y.get(),
+            roi4_width=self.roi4_width.get(),
+            roi4_height=self.roi4_height.get(),
+            roi4_bottom_region_ratio=self.roi4_bottom_region_ratio.get(),
         )
 
     def load_settings_defaults(self) -> None:
@@ -922,6 +1197,25 @@ class HemRoi2BatchAnalyzerGui:
             self.roi2_right.set(str(roi2["right"]))
             self.roi2_top.set(str(roi2["top"]))
             self.roi2_bottom.set(str(roi2["bottom"]))
+            roi3 = _settings_roi3_params(settings)
+            self.roi3_left.set(str(roi3["left"]))
+            self.roi3_right.set(str(roi3["right"]))
+            self.roi3_top.set(str(roi3["top"]))
+            self.roi3_bottom.set(str(roi3["bottom"]))
+            roi4_rect = _settings_roi4_rect(settings)
+            if roi4_rect is None:
+                self.roi4_x.set("")
+                self.roi4_y.set("")
+                self.roi4_width.set("")
+                self.roi4_height.set("")
+                roi4_ratio = _settings_roi4_bottom_region_ratio(settings)
+                self.roi4_bottom_region_ratio.set("" if roi4_ratio is None else str(roi4_ratio))
+            else:
+                self.roi4_x.set(str(roi4_rect[0]))
+                self.roi4_y.set(str(roi4_rect[1]))
+                self.roi4_width.set(str(roi4_rect[2] - roi4_rect[0]))
+                self.roi4_height.set(str(roi4_rect[3] - roi4_rect[1]))
+                self.roi4_bottom_region_ratio.set("")
             self.difference_threshold.set(str(_settings_difference_threshold(settings)))
             self.focus_y_offset_mm.set(str(_settings_focus_y_offset(settings)))
             self.status.set("配置默认值已加载。")
@@ -940,6 +1234,9 @@ class HemRoi2BatchAnalyzerGui:
             config.provider_depth_mm,
             config.focus_y_offset_mm,
             tuple(sorted((str(k), int(v)) for k, v in config.roi2_extension_params.items())),
+            tuple(sorted((str(k), int(v)) for k, v in config.roi3_extension_params.items())),
+            config.roi4_rect,
+            config.roi4_bottom_region_ratio,
             config.difference_threshold,
             config.before_frame_index,
             config.after_strategy,
@@ -1046,6 +1343,9 @@ class HemRoi2BatchAnalyzerGui:
                 bool(self.show_roi2.get()),
                 bool(self.show_focus.get()),
                 max_size=self._preview_max_size(),
+                show_roi1=bool(self.show_roi1.get()),
+                show_roi3=bool(self.show_roi3.get()),
+                show_roi4=bool(self.show_roi4.get()),
             )
             self._current_preview_meta = meta
             self._display_preview_image(image)
@@ -1053,7 +1353,11 @@ class HemRoi2BatchAnalyzerGui:
             self.frame_info.set(f"帧 {self._current_frame_index + 1}/{len(self._current_frame_paths)}: {frame_path.name}")
             self.status.set(
                 f"已显示 {sequence_dir.name} 的第 {self._current_frame_index + 1} 帧。"
-                f" ROI2={_fmt_rect(meta['roi2_rect'])} 焦点={_fmt_point(meta['focus_anchor'])}"
+                f" ROI1={_fmt_rect(meta['roi1_rect'])}"
+                f" ROI2={_fmt_rect(meta['roi2_rect'])}"
+                f" ROI3={_fmt_rect(meta['roi3_rect'])}"
+                f" ROI4={_fmt_rect(meta['roi4_rect'])}"
+                f" 焦点={_fmt_point(meta['focus_anchor'])}"
             )
         except Exception as exc:
             self.status.set(f"刷新预览失败：{exc}")
