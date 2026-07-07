@@ -296,6 +296,77 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "必须填写全局焦点或选择焦点CSV"):
                 analyzer.config_from_gui_state(state)
 
+    def test_gui_settings_change_refreshes_roi2_and_focus_preview(self):
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeRoot:
+            def __init__(self):
+                self.after_calls = []
+                self.cancelled = []
+
+            def after(self, delay_ms, callback, *args):
+                self.after_calls.append((delay_ms, callback, args))
+                callback(*args)
+                return "after-id"
+
+            def after_cancel(self, after_id):
+                self.cancelled.append(after_id)
+
+        class FakeStatus:
+            def __init__(self):
+                self.value = ""
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.root = FakeRoot()
+        gui.focus_point = FakeVar("PointF(100, 100)")
+        gui.focus_x = FakeVar("100")
+        gui.focus_y = FakeVar("100")
+        gui.root_dir = FakeVar(".")
+        gui.output_csv = FakeVar("summary.csv")
+        gui.per_frame_csv = FakeVar("")
+        gui.settings_path = FakeVar("")
+        gui.focus_points_csv = FakeVar("")
+        gui.provider_depth_mm = FakeVar("100")
+        gui.focus_y_offset_mm = FakeVar("0")
+        gui.roi2_left = FakeVar("5")
+        gui.roi2_right = FakeVar("5")
+        gui.roi2_top = FakeVar("5")
+        gui.roi2_bottom = FakeVar("5")
+        gui.difference_threshold = FakeVar("0.5")
+        gui.before_frame_index = FakeVar("1")
+        gui.after_strategy = FakeVar("roi2_peak")
+        gui.include_selected_debug = FakeVar(False)
+        gui.max_sequences = FakeVar("")
+        gui.status = FakeStatus()
+        gui._preview_refresh_after_id = None
+        gui._current_frame_paths = [Path("frame.png")]
+        gui._step_sequence_dirs = [Path("seq")]
+        gui._step_source_key = (".", False, "")
+        gui._step_config_key = None
+
+        calls = []
+        gui.refresh_preview = lambda: calls.append(analyzer.config_from_gui_state(gui.current_state()))
+
+        gui.roi2_left.set("20")
+        gui._schedule_preview_refresh()
+        self.assertEqual(calls[-1].roi2_extension_params["left"], 20)
+
+        gui.focus_x.set("120")
+        gui.focus_y.set("130")
+        gui._schedule_preview_refresh()
+        self.assertEqual(calls[-1].focus_point, "PointF(120.0, 130.0)")
+
     def test_gui_run_analysis_returns_immediately_while_one_sequence_runs(self):
         class FakeButton:
             def __init__(self):
@@ -345,6 +416,7 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.show_focus = type("Var", (), {"get": lambda self: True})()
         gui._analysis_running = False
         gui._step_config_key = None
+        gui._step_source_key = None
         gui._step_sequence_dirs = []
         gui._step_next_index = 0
         gui._current_sequence_index = 0
