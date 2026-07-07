@@ -3,9 +3,10 @@ import csv
 import json
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 from PIL import Image
@@ -428,11 +429,18 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None
         writer.writerows(rows)
 
 
-def analyze_root(config: AnalyzerConfig) -> list[dict[str, str]]:
+def analyze_root(
+    config: AnalyzerConfig,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict[str, str]]:
     focus_points = load_focus_points_csv(config.focus_points_csv)
     summary_rows: list[dict[str, str]] = []
     frame_rows: list[dict[str, str]] = []
-    for sequence_dir in list_sequences(config.root_dir, config.max_sequences):
+    sequence_dirs = list_sequences(config.root_dir, config.max_sequences)
+    total = len(sequence_dirs)
+    for index, sequence_dir in enumerate(sequence_dirs, start=1):
+        if progress_callback is not None:
+            progress_callback(index, total, sequence_dir.name)
         row, sequence_frame_rows = analyze_sequence(sequence_dir, config, focus_points)
         summary_rows.append(row)
         frame_rows.extend(sequence_frame_rows)
@@ -521,6 +529,7 @@ class HemRoi2BatchAnalyzerGui:
         self.include_selected_debug = tk.BooleanVar(value=False)
         self.max_sequences = tk.StringVar(value="")
         self.status = tk.StringVar(value="Set parameters, then run analysis.")
+        self._analysis_running = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -573,7 +582,8 @@ class HemRoi2BatchAnalyzerGui:
         buttons = ttk.Frame(main)
         buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(buttons, text="Load settings defaults", command=self.load_settings_defaults).pack(side="left")
-        ttk.Button(buttons, text="Run analysis", command=self.run_analysis).pack(side="right")
+        self.run_button = ttk.Button(buttons, text="Run analysis", command=self.run_analysis)
+        self.run_button.pack(side="right")
         row += 1
 
         ttk.Label(main, textvariable=self.status, wraplength=760).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
@@ -647,12 +657,46 @@ class HemRoi2BatchAnalyzerGui:
 
         try:
             config = config_from_gui_state(self.current_state())
-            rows = analyze_root(config)
-            self.status.set(f"Completed. Analyzed {len(rows)} sequences. Summary: {config.output_csv}")
-            messagebox.showinfo("Analysis completed", f"Analyzed {len(rows)} sequences.\nSummary CSV:\n{config.output_csv}")
         except Exception as exc:
             self.status.set(f"Analysis failed: {exc}")
             messagebox.showerror("Analysis failed", str(exc))
+            return
+
+        if self._analysis_running:
+            self.status.set("Analysis is already running.")
+            return
+
+        self._analysis_running = True
+        self.run_button.state(["disabled"])
+        self.status.set("Analysis started...")
+
+        def set_status(text: str) -> None:
+            self.root.after(0, self.status.set, text)
+
+        def progress(index: int, total: int, sequence_name: str) -> None:
+            set_status(f"Analyzing {index}/{total}: {sequence_name}")
+
+        def finish_success(rows: list[dict[str, str]]) -> None:
+            self._analysis_running = False
+            self.run_button.state(["!disabled"])
+            self.status.set(f"Completed. Analyzed {len(rows)} sequences. Summary: {config.output_csv}")
+            messagebox.showinfo("Analysis completed", f"Analyzed {len(rows)} sequences.\nSummary CSV:\n{config.output_csv}")
+
+        def finish_error(exc: Exception) -> None:
+            self._analysis_running = False
+            self.run_button.state(["!disabled"])
+            self.status.set(f"Analysis failed: {exc}")
+            messagebox.showerror("Analysis failed", str(exc))
+
+        def worker() -> None:
+            try:
+                rows = analyze_root(config, progress_callback=progress)
+            except Exception as exc:
+                self.root.after(0, finish_error, exc)
+                return
+            self.root.after(0, finish_success, rows)
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 def launch_gui() -> int:

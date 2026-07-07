@@ -1,6 +1,8 @@
 import csv
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -233,6 +235,79 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Global focus point or Focus points CSV is required"):
                 analyzer.config_from_gui_state(state)
+
+    def test_gui_run_analysis_returns_immediately_while_worker_runs(self):
+        class FakeButton:
+            def __init__(self):
+                self.state_calls = []
+
+            def state(self, values):
+                self.state_calls.append(tuple(values))
+
+        class FakeRoot:
+            def __init__(self):
+                self.after_calls = []
+
+            def after(self, delay_ms, callback, *args):
+                self.after_calls.append((delay_ms, callback, args))
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.root = FakeRoot()
+        gui.run_button = FakeButton()
+        gui.status = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
+        gui._analysis_running = False
+        gui.current_state = lambda: analyzer.GuiState(
+            root_dir=".",
+            output_csv="summary.csv",
+            per_frame_csv="",
+            settings_path="",
+            focus_point=analyzer.DEFAULT_FOCUS_POINT,
+            focus_points_csv="",
+            provider_depth_mm="",
+            focus_y_offset_mm="0",
+            roi2_left="40",
+            roi2_right="40",
+            roi2_top="50",
+            roi2_bottom="30",
+            difference_threshold="0.5",
+            before_frame_index="1",
+            after_strategy="roi2_peak",
+            include_selected_debug=False,
+            max_sequences="",
+        )
+
+        calls = []
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def slow_analyze_root(config, progress_callback=None):
+            calls.append(config)
+            worker_started.set()
+            release_worker.wait(0.5)
+            return []
+
+        original = analyzer.analyze_root
+        import tkinter.messagebox as messagebox
+
+        original_showinfo = messagebox.showinfo
+        original_showerror = messagebox.showerror
+        analyzer.analyze_root = slow_analyze_root
+        messagebox.showinfo = lambda *args, **kwargs: None
+        messagebox.showerror = lambda *args, **kwargs: None
+        try:
+            started = time.perf_counter()
+            gui.run_analysis()
+            elapsed = time.perf_counter() - started
+            self.assertTrue(worker_started.wait(1.0))
+        finally:
+            release_worker.set()
+            analyzer.analyze_root = original
+            messagebox.showinfo = original_showinfo
+            messagebox.showerror = original_showerror
+
+        self.assertLess(elapsed, 0.1)
+        self.assertEqual(gui.run_button.state_calls, [("disabled",)])
+        self.assertTrue(gui._analysis_running)
 
 
 if __name__ == "__main__":
