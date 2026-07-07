@@ -530,6 +530,11 @@ class HemRoi2BatchAnalyzerGui:
         self.max_sequences = tk.StringVar(value="")
         self.status = tk.StringVar(value="Set parameters, then run analysis.")
         self._analysis_running = False
+        self._step_config_key = None
+        self._step_sequence_dirs: list[Path] = []
+        self._step_next_index = 0
+        self._step_summary_rows: list[dict[str, str]] = []
+        self._step_frame_rows: list[dict[str, str]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -582,7 +587,7 @@ class HemRoi2BatchAnalyzerGui:
         buttons = ttk.Frame(main)
         buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(buttons, text="Load settings defaults", command=self.load_settings_defaults).pack(side="left")
-        self.run_button = ttk.Button(buttons, text="Run analysis", command=self.run_analysis)
+        self.run_button = ttk.Button(buttons, text="Analyze next sequence", command=self.run_analysis)
         self.run_button.pack(side="right")
         row += 1
 
@@ -652,6 +657,31 @@ class HemRoi2BatchAnalyzerGui:
             self.status.set("Failed to load settings.")
             messagebox.showerror("Failed to load settings", str(exc))
 
+    def _config_key(self, config: AnalyzerConfig) -> tuple:
+        return (
+            str(config.root_dir),
+            str(config.output_csv),
+            str(config.per_frame_csv) if config.per_frame_csv is not None else "",
+            str(config.settings_path) if config.settings_path is not None else "",
+            str(config.focus_point),
+            str(config.focus_points_csv) if config.focus_points_csv is not None else "",
+            config.provider_depth_mm,
+            config.focus_y_offset_mm,
+            tuple(sorted((str(k), int(v)) for k, v in config.roi2_extension_params.items())),
+            config.difference_threshold,
+            config.before_frame_index,
+            config.after_strategy,
+            config.include_selected_debug,
+            config.max_sequences,
+        )
+
+    def _reset_step_state(self, config: AnalyzerConfig) -> None:
+        self._step_config_key = self._config_key(config)
+        self._step_sequence_dirs = list_sequences(config.root_dir, config.max_sequences)
+        self._step_next_index = 0
+        self._step_summary_rows = []
+        self._step_frame_rows = []
+
     def run_analysis(self) -> None:
         from tkinter import messagebox
 
@@ -666,21 +696,44 @@ class HemRoi2BatchAnalyzerGui:
             self.status.set("Analysis is already running.")
             return
 
+        config_key = self._config_key(config)
+        if config_key != self._step_config_key:
+            try:
+                self._reset_step_state(config)
+            except Exception as exc:
+                self.status.set(f"Analysis failed: {exc}")
+                messagebox.showerror("Analysis failed", str(exc))
+                return
+
+        total = len(self._step_sequence_dirs)
+        if total == 0:
+            self.status.set(f"No sequence folders found: {config.root_dir}")
+            return
+        if self._step_next_index >= total:
+            self.status.set(f"All sequences analyzed. Summary: {config.output_csv}")
+            messagebox.showinfo("Analysis completed", f"All {total} sequences have already been analyzed.\nSummary CSV:\n{config.output_csv}")
+            return
+
+        sequence_index = self._step_next_index
+        sequence_dir = self._step_sequence_dirs[sequence_index]
         self._analysis_running = True
         self.run_button.state(["disabled"])
-        self.status.set("Analysis started...")
+        self.status.set(f"Analyzing {sequence_index + 1}/{total}: {sequence_dir.name}")
 
-        def set_status(text: str) -> None:
-            self.root.after(0, self.status.set, text)
-
-        def progress(index: int, total: int, sequence_name: str) -> None:
-            set_status(f"Analyzing {index}/{total}: {sequence_name}")
-
-        def finish_success(rows: list[dict[str, str]]) -> None:
+        def finish_success(row: dict[str, str], frame_rows: list[dict[str, str]]) -> None:
+            self._step_summary_rows.append(row)
+            self._step_frame_rows.extend(frame_rows)
+            self._step_next_index += 1
+            write_csv(config.output_csv, SUMMARY_FIELDS, self._step_summary_rows)
+            if config.per_frame_csv is not None:
+                write_csv(config.per_frame_csv, FRAME_FIELDS, self._step_frame_rows)
             self._analysis_running = False
             self.run_button.state(["!disabled"])
-            self.status.set(f"Completed. Analyzed {len(rows)} sequences. Summary: {config.output_csv}")
-            messagebox.showinfo("Analysis completed", f"Analyzed {len(rows)} sequences.\nSummary CSV:\n{config.output_csv}")
+            remaining = total - self._step_next_index
+            self.status.set(
+                f"Completed {self._step_next_index}/{total}: {sequence_dir.name}. "
+                f"Remaining: {remaining}. Summary: {config.output_csv}"
+            )
 
         def finish_error(exc: Exception) -> None:
             self._analysis_running = False
@@ -690,11 +743,12 @@ class HemRoi2BatchAnalyzerGui:
 
         def worker() -> None:
             try:
-                rows = analyze_root(config, progress_callback=progress)
+                focus_points = load_focus_points_csv(config.focus_points_csv)
+                row, frame_rows = analyze_sequence(sequence_dir, config, focus_points)
             except Exception as exc:
                 self.root.after(0, finish_error, exc)
                 return
-            self.root.after(0, finish_success, rows)
+            self.root.after(0, finish_success, row, frame_rows)
 
         threading.Thread(target=worker, daemon=True).start()
 

@@ -236,7 +236,7 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Global focus point or Focus points CSV is required"):
                 analyzer.config_from_gui_state(state)
 
-    def test_gui_run_analysis_returns_immediately_while_worker_runs(self):
+    def test_gui_run_analysis_returns_immediately_while_one_sequence_runs(self):
         class FakeButton:
             def __init__(self):
                 self.state_calls = []
@@ -256,6 +256,11 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         gui.run_button = FakeButton()
         gui.status = type("Status", (), {"set": lambda self, value: setattr(self, "value", value)})()
         gui._analysis_running = False
+        gui._step_config_key = None
+        gui._step_sequence_dirs = []
+        gui._step_next_index = 0
+        gui._step_summary_rows = []
+        gui._step_frame_rows = []
         gui.current_state = lambda: analyzer.GuiState(
             root_dir=".",
             output_csv="summary.csv",
@@ -280,27 +285,77 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         worker_started = threading.Event()
         release_worker = threading.Event()
 
-        def slow_analyze_root(config, progress_callback=None):
-            calls.append(config)
+        def slow_analyze_sequence(sequence_dir, config, focus_points):
+            calls.append(sequence_dir.name)
             worker_started.set()
             release_worker.wait(0.5)
-            return []
+            return (
+                {
+                    "sequence": sequence_dir.name,
+                    "status": "ok",
+                    "error": "",
+                    "frame_count": "0",
+                    "focus_anchor": "",
+                    "offset_anchor": "",
+                    "roi2_rect": "",
+                    "before_frame_index": "",
+                    "before_frame": "",
+                    "before_mean": "",
+                    "after_frame_index": "",
+                    "after_frame": "",
+                    "after_mean": "",
+                    "roi2_diff": "",
+                    "difference_threshold": "",
+                    "roi2_color": "red",
+                    "after_strategy": "",
+                },
+                [],
+            )
 
+        def fail_analyze_root(config, progress_callback=None):
+            raise AssertionError("GUI must not batch-analyze all sequences")
+
+        original_sequence = analyzer.analyze_sequence
         original = analyzer.analyze_root
         import tkinter.messagebox as messagebox
 
         original_showinfo = messagebox.showinfo
         original_showerror = messagebox.showerror
-        analyzer.analyze_root = slow_analyze_root
+        analyzer.analyze_sequence = slow_analyze_sequence
+        analyzer.analyze_root = fail_analyze_root
         messagebox.showinfo = lambda *args, **kwargs: None
         messagebox.showerror = lambda *args, **kwargs: None
         try:
-            started = time.perf_counter()
-            gui.run_analysis()
-            elapsed = time.perf_counter() - started
-            self.assertTrue(worker_started.wait(1.0))
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "seq_a").mkdir()
+                (root / "seq_b").mkdir()
+                gui.current_state = lambda: analyzer.GuiState(
+                    root_dir=str(root),
+                    output_csv=str(root / "summary.csv"),
+                    per_frame_csv="",
+                    settings_path="",
+                    focus_point=analyzer.DEFAULT_FOCUS_POINT,
+                    focus_points_csv="",
+                    provider_depth_mm="",
+                    focus_y_offset_mm="0",
+                    roi2_left="40",
+                    roi2_right="40",
+                    roi2_top="50",
+                    roi2_bottom="30",
+                    difference_threshold="0.5",
+                    before_frame_index="1",
+                    after_strategy="roi2_peak",
+                    include_selected_debug=False,
+                    max_sequences="",
+                )
+                started = time.perf_counter()
+                gui.run_analysis()
+                elapsed = time.perf_counter() - started
+                self.assertTrue(worker_started.wait(1.0))
         finally:
             release_worker.set()
+            analyzer.analyze_sequence = original_sequence
             analyzer.analyze_root = original
             messagebox.showinfo = original_showinfo
             messagebox.showerror = original_showerror
@@ -308,6 +363,67 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertLess(elapsed, 0.1)
         self.assertEqual(gui.run_button.state_calls, [("disabled",)])
         self.assertTrue(gui._analysis_running)
+        self.assertEqual(calls, ["seq_a"])
+
+    def test_gui_stepwise_analysis_advances_one_sequence_per_click(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq_a = root / "seq_a"
+            seq_b = root / "seq_b"
+            seq_a.mkdir()
+            seq_b.mkdir()
+            write_frame(seq_a / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
+            write_frame(seq_a / "00002_2026-06-14_00-00-00.070_frame.png", 20, size=(400, 400))
+            write_frame(seq_b / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
+            write_frame(seq_b / "00002_2026-06-14_00-00-00.070_frame.png", 12, size=(400, 400))
+
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=root / "frames.csv",
+                settings_path=None,
+                focus_point="PointF(100, 100)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+            )
+            gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+            gui._step_config_key = None
+            gui._step_sequence_dirs = []
+            gui._step_next_index = 0
+            gui._step_summary_rows = []
+            gui._step_frame_rows = []
+
+            gui._reset_step_state(cfg)
+            focus_points = analyzer.load_focus_points_csv(cfg.focus_points_csv)
+            first_row, first_frames = analyzer.analyze_sequence(gui._step_sequence_dirs[gui._step_next_index], cfg, focus_points)
+            gui._step_summary_rows.append(first_row)
+            gui._step_frame_rows.extend(first_frames)
+            gui._step_next_index += 1
+            analyzer.write_csv(cfg.output_csv, analyzer.SUMMARY_FIELDS, gui._step_summary_rows)
+            analyzer.write_csv(cfg.per_frame_csv, analyzer.FRAME_FIELDS, gui._step_frame_rows)
+
+            with cfg.output_csv.open("r", encoding="utf-8-sig", newline="") as f:
+                saved = list(csv.DictReader(f))
+            self.assertEqual([row["sequence"] for row in saved], ["seq_a"])
+
+            second_row, second_frames = analyzer.analyze_sequence(gui._step_sequence_dirs[gui._step_next_index], cfg, focus_points)
+            gui._step_summary_rows.append(second_row)
+            gui._step_frame_rows.extend(second_frames)
+            gui._step_next_index += 1
+            analyzer.write_csv(cfg.output_csv, analyzer.SUMMARY_FIELDS, gui._step_summary_rows)
+            analyzer.write_csv(cfg.per_frame_csv, analyzer.FRAME_FIELDS, gui._step_frame_rows)
+
+            with cfg.output_csv.open("r", encoding="utf-8-sig", newline="") as f:
+                saved = list(csv.DictReader(f))
+            self.assertEqual([row["sequence"] for row in saved], ["seq_a", "seq_b"])
+            self.assertEqual(gui._step_next_index, 2)
 
 
 if __name__ == "__main__":
