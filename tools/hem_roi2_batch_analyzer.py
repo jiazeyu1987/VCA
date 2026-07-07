@@ -35,6 +35,16 @@ ROI_NAMES = ("ROI1", "ROI2", "ROI3", "ROI4")
 ROI_RECT_FIELDS = ("x", "y", "width", "height")
 GUI_SETTINGS_KEY = "hem_roi2_batch_analyzer"
 ROI_RECT_OVERRIDES_KEY = "roi_rect_overrides"
+ROI_DEFINITIONS_KEY = "roi_definitions"
+HIGHLIGHT_RULE_KEY = "highlight_rule"
+EXCEL_OUTPUT_DIR_KEY = "excel_output_dir"
+ROI_SHAPE_VALUES = ("rectangle", "ellipse")
+ROI_SHAPE_LABELS = {"矩形": "rectangle", "椭圆": "ellipse"}
+ROI_SHAPE_DISPLAY = {value: label for label, value in ROI_SHAPE_LABELS.items()}
+HIGHLIGHT_MODE_LABELS = {"固定灰度值": "fixed_gray", "基线倍数": "baseline_multiplier"}
+HIGHLIGHT_MODE_DISPLAY = {value: label for label, value in HIGHLIGHT_MODE_LABELS.items()}
+DEFAULT_FIXED_GRAY_THRESHOLD = 93.0
+DEFAULT_EXCEL_OUTPUT_DIR = Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "excel"
 ROI1_COLOR = api_server.ROI1_MARKER_COLOR
 ROI2_COLOR = api_server.ROI2_MARKER_COLOR
 ROI3_COLOR = api_server.ROI3_MARKER_COLOR
@@ -120,6 +130,9 @@ class AnalyzerConfig:
     roi4_rect: Optional[tuple[int, int, int, int]] = None
     roi4_bottom_region_ratio: Optional[float] = None
     roi_rect_overrides: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    roi_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    highlight_rule: dict[str, Any] = field(default_factory=dict)
+    excel_output_dir: Path = DEFAULT_EXCEL_OUTPUT_DIR
 
 
 @dataclass(frozen=True)
@@ -151,6 +164,11 @@ class GuiState:
     roi4_height: str = ""
     roi4_bottom_region_ratio: str = ""
     roi_rect_inputs: dict[str, dict[str, str]] = field(default_factory=dict)
+    roi_shape_inputs: dict[str, str] = field(default_factory=dict)
+    highlight_mode: str = "baseline_multiplier"
+    highlight_fixed_gray: str = str(DEFAULT_FIXED_GRAY_THRESHOLD)
+    highlight_baseline_multiplier: str = str(HEM_THRESHOLD_MEAN_MULTIPLIER)
+    excel_output_dir: str = str(DEFAULT_EXCEL_OUTPUT_DIR)
 
 
 def _fmt_float(value: Optional[float]) -> str:
@@ -228,6 +246,49 @@ def _settings_roi_rect_overrides(settings: dict) -> dict[str, tuple[int, int, in
     return overrides
 
 
+def _normalize_roi_shape(value: Any, label: str) -> str:
+    shape = ROI_SHAPE_LABELS.get(str(value), str(value)).strip()
+    if shape not in ROI_SHAPE_VALUES:
+        raise ValueError(f"{label} shape must be rectangle or ellipse")
+    return shape
+
+
+def _parse_roi_definition_payload(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object with shape/x/y/width/height")
+    return {
+        "shape": _normalize_roi_shape(value.get("shape", "rectangle"), label),
+        "rect": _parse_roi_rect_payload(value, label),
+    }
+
+
+def _settings_roi_definitions(settings: dict) -> dict[str, dict[str, Any]]:
+    tool_settings = settings.get(GUI_SETTINGS_KEY)
+    if tool_settings is None:
+        return {
+            roi_name: {"shape": "rectangle", "rect": rect}
+            for roi_name, rect in _settings_roi_rect_overrides(settings).items()
+        }
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    payload = tool_settings.get(ROI_DEFINITIONS_KEY)
+    if payload is None:
+        return {
+            roi_name: {"shape": "rectangle", "rect": rect}
+            for roi_name, rect in _settings_roi_rect_overrides(settings).items()
+        }
+    if not isinstance(payload, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY}.{ROI_DEFINITIONS_KEY} must be an object")
+    definitions: dict[str, dict[str, Any]] = {}
+    for roi_name in ROI_NAMES:
+        if roi_name in payload:
+            definitions[roi_name] = _parse_roi_definition_payload(
+                payload[roi_name],
+                f"{GUI_SETTINGS_KEY}.{ROI_DEFINITIONS_KEY}.{roi_name}",
+            )
+    return definitions
+
+
 def _rect_to_input_values(rect: Optional[tuple[int, int, int, int]]) -> dict[str, str]:
     if rect is None:
         return {field: "" for field in ROI_RECT_FIELDS}
@@ -266,6 +327,28 @@ def _roi_rect_overrides_from_inputs(inputs: dict[str, dict[str, str]]) -> dict[s
     return overrides
 
 
+def _roi_definitions_from_inputs(
+    rect_inputs: dict[str, dict[str, str]],
+    shape_inputs: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {}
+    for roi_name in ROI_NAMES:
+        rect = _roi_rect_from_input_values(rect_inputs.get(roi_name, {}), roi_name)
+        if rect is None:
+            continue
+        shape = _normalize_roi_shape(shape_inputs.get(roi_name, "rectangle"), roi_name)
+        definitions[roi_name] = {"shape": shape, "rect": rect}
+    return definitions
+
+
+def _roi_rect_overrides_from_definitions(definitions: dict[str, dict[str, Any]]) -> dict[str, tuple[int, int, int, int]]:
+    return {
+        roi_name: tuple(definition["rect"])
+        for roi_name, definition in definitions.items()
+        if roi_name in ROI_NAMES and definition.get("rect") is not None
+    }
+
+
 def _rect_to_settings_payload(rect: tuple[int, int, int, int]) -> dict[str, int]:
     x1, y1, x2, y2 = [int(v) for v in rect]
     return {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
@@ -298,6 +381,90 @@ def save_roi_rect_overrides(settings_path: Path, overrides: dict[str, Optional[t
         if roi_name in ROI_NAMES and rect is not None
     }
     tool_settings[ROI_RECT_OVERRIDES_KEY] = persisted
+    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _default_highlight_rule() -> dict[str, Any]:
+    return {
+        "mode": "baseline_multiplier",
+        "fixed_gray": DEFAULT_FIXED_GRAY_THRESHOLD,
+        "baseline_multiplier": HEM_THRESHOLD_MEAN_MULTIPLIER,
+    }
+
+
+def _normalize_highlight_rule(rule: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if rule is None:
+        return _default_highlight_rule()
+    if not isinstance(rule, dict):
+        raise ValueError("highlight_rule must be an object")
+    mode = HIGHLIGHT_MODE_LABELS.get(str(rule.get("mode", "baseline_multiplier")), str(rule.get("mode", "baseline_multiplier"))).strip()
+    if mode not in {"fixed_gray", "baseline_multiplier"}:
+        raise ValueError("highlight_rule.mode must be fixed_gray or baseline_multiplier")
+    fixed_gray = float(rule.get("fixed_gray", DEFAULT_FIXED_GRAY_THRESHOLD))
+    baseline_multiplier = float(rule.get("baseline_multiplier", HEM_THRESHOLD_MEAN_MULTIPLIER))
+    if fixed_gray < 0 or fixed_gray > 255:
+        raise ValueError("highlight_rule.fixed_gray must be in 0..255")
+    if baseline_multiplier <= 0:
+        raise ValueError("highlight_rule.baseline_multiplier must be > 0")
+    return {"mode": mode, "fixed_gray": fixed_gray, "baseline_multiplier": baseline_multiplier}
+
+
+def _settings_highlight_rule(settings: dict) -> dict[str, Any]:
+    tool_settings = settings.get(GUI_SETTINGS_KEY)
+    if tool_settings is None:
+        return _default_highlight_rule()
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    return _normalize_highlight_rule(tool_settings.get(HIGHLIGHT_RULE_KEY))
+
+
+def _highlight_rule_from_state(state: GuiState, settings: dict) -> dict[str, Any]:
+    return _normalize_highlight_rule(
+        {
+            "mode": state.highlight_mode.strip() or _settings_highlight_rule(settings)["mode"],
+            "fixed_gray": state.highlight_fixed_gray.strip() or _settings_highlight_rule(settings)["fixed_gray"],
+            "baseline_multiplier": state.highlight_baseline_multiplier.strip()
+            or _settings_highlight_rule(settings)["baseline_multiplier"],
+        }
+    )
+
+
+def _settings_excel_output_dir(settings: dict) -> Path:
+    tool_settings = settings.get(GUI_SETTINGS_KEY)
+    if tool_settings is None:
+        return DEFAULT_EXCEL_OUTPUT_DIR
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    value = tool_settings.get(EXCEL_OUTPUT_DIR_KEY)
+    return Path(str(value)) if value else DEFAULT_EXCEL_OUTPUT_DIR
+
+
+def save_visual_analysis_settings(
+    settings_path: Path,
+    definitions: dict[str, dict[str, Any]],
+    highlight_rule: dict[str, Any],
+    excel_output_dir: Path,
+) -> None:
+    settings = _load_settings(settings_path)
+    tool_settings = settings.setdefault(GUI_SETTINGS_KEY, {})
+    if not isinstance(tool_settings, dict):
+        raise ValueError(f"settings.{GUI_SETTINGS_KEY} must be an object")
+    persisted_definitions: dict[str, dict[str, Any]] = {}
+    persisted_rects: dict[str, dict[str, int]] = {}
+    for roi_name in ROI_NAMES:
+        definition = definitions.get(roi_name)
+        if not definition:
+            continue
+        rect = tuple(definition["rect"])
+        shape = _normalize_roi_shape(definition.get("shape", "rectangle"), roi_name)
+        payload = _rect_to_settings_payload(rect)
+        payload["shape"] = shape
+        persisted_definitions[roi_name] = payload
+        persisted_rects[roi_name] = _rect_to_settings_payload(rect)
+    tool_settings[ROI_DEFINITIONS_KEY] = persisted_definitions
+    tool_settings[ROI_RECT_OVERRIDES_KEY] = persisted_rects
+    tool_settings[HIGHLIGHT_RULE_KEY] = _normalize_highlight_rule(highlight_rule)
+    tool_settings[EXCEL_OUTPUT_DIR_KEY] = str(excel_output_dir)
     settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -480,7 +647,9 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     )
     roi4_rect = _roi4_rect_from_state(state, settings)
     roi4_bottom_region_ratio = _roi4_bottom_region_ratio_from_state(state, settings, roi4_rect)
-    roi_rect_overrides = _roi_rect_overrides_from_inputs(state.roi_rect_inputs)
+    roi_definitions = _roi_definitions_from_inputs(state.roi_rect_inputs, state.roi_shape_inputs)
+    roi_rect_overrides = _roi_rect_overrides_from_definitions(roi_definitions)
+    highlight_rule = _highlight_rule_from_state(state, settings)
     threshold = _optional_float(state.difference_threshold, "差值阈值")
     focus_y_offset = _optional_float(state.focus_y_offset_mm, "焦点y偏移mm")
     provider_depth = _optional_float(state.provider_depth_mm, "超声深度mm")
@@ -511,6 +680,9 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         roi4_rect=roi4_rect,
         roi4_bottom_region_ratio=roi4_bottom_region_ratio,
         roi_rect_overrides=roi_rect_overrides,
+        roi_definitions=roi_definitions,
+        highlight_rule=highlight_rule,
+        excel_output_dir=Path(state.excel_output_dir.strip()) if state.excel_output_dir.strip() else _settings_excel_output_dir(settings),
     )
 
 
@@ -569,9 +741,10 @@ def frame_roi2_mean(path: Path, roi2_rect: tuple[int, int, int, int]) -> float:
     return api_server.roi_gray_mean(frame, roi2_rect)
 
 
-def _empty_roi_stats() -> dict[str, str]:
+def _empty_roi_stats() -> dict[str, Any]:
     return {
         "rect": "",
+        "shape": "",
         "width": "",
         "height": "",
         "area": "",
@@ -599,38 +772,83 @@ def _empty_roi_stats() -> dict[str, str]:
         "std_delta": "",
         "median_delta": "",
         "highlight_area_delta": "",
+        "histogram": [0] * 256,
     }
 
 
-def _roi_gray_pixels(frame: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
+def _roi_gray_pixels(frame: np.ndarray, rect: tuple[int, int, int, int], shape: str = "rectangle") -> np.ndarray:
     x1, y1, x2, y2 = [int(v) for v in rect]
     roi = frame[y1:y2, x1:x2]
     if roi.size == 0:
         return np.asarray([], dtype=np.float64)
-    return api_server.gray_image(roi).astype(np.float64).reshape(-1)
+    gray = api_server.gray_image(roi).astype(np.float64)
+    shape = _normalize_roi_shape(shape, "ROI")
+    if shape == "rectangle":
+        return gray.reshape(-1)
+    height, width = gray.shape[:2]
+    if width <= 0 or height <= 0:
+        return np.asarray([], dtype=np.float64)
+    yy, xx = np.ogrid[:height, :width]
+    cx = (width - 1) / 2.0
+    cy = (height - 1) / 2.0
+    rx = max(width / 2.0, 0.5)
+    ry = max(height / 2.0, 0.5)
+    mask = (((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2) <= 1.0
+    return gray[mask].reshape(-1)
+
+
+def roi_gray_histogram(
+    frame: np.ndarray,
+    rect: Optional[tuple[int, int, int, int]],
+    shape: str = "rectangle",
+) -> list[int]:
+    if rect is None:
+        return [0] * 256
+    pixels = _roi_gray_pixels(frame, rect, shape)
+    if pixels.size == 0:
+        return [0] * 256
+    bins = np.clip(np.rint(pixels), 0, 255).astype(np.uint8)
+    return np.bincount(bins, minlength=256).astype(int).tolist()
+
+
+def _highlight_threshold(
+    mean: float,
+    baseline_mean: Optional[float],
+    highlight_rule: Optional[dict[str, Any]],
+) -> float:
+    rule = _normalize_highlight_rule(highlight_rule)
+    if rule["mode"] == "fixed_gray":
+        return float(rule["fixed_gray"])
+    threshold_base = baseline_mean if baseline_mean is not None else mean
+    return float(threshold_base) * float(rule["baseline_multiplier"])
 
 
 def roi_stats_for_frame(
     frame: np.ndarray,
     rect: Optional[tuple[int, int, int, int]],
     baseline_stats: Optional[dict[str, str]] = None,
-) -> dict[str, str]:
+    shape: str = "rectangle",
+    highlight_rule: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     if rect is None:
         return _empty_roi_stats()
+    shape = _normalize_roi_shape(shape, "ROI")
     x1, y1, x2, y2 = [int(v) for v in rect]
     width = max(0, x2 - x1)
     height = max(0, y2 - y1)
-    area = width * height
-    pixels = _roi_gray_pixels(frame, (x1, y1, x2, y2))
+    pixels = _roi_gray_pixels(frame, (x1, y1, x2, y2), shape)
+    area = int(pixels.size)
     if pixels.size == 0:
         stats = _empty_roi_stats()
         stats.update({
             "rect": _fmt_rect((x1, y1, x2, y2)),
+            "shape": shape,
             "width": str(width),
             "height": str(height),
-            "area": str(area),
+            "area": "0",
         })
         return stats
+    histogram = roi_gray_histogram(frame, (x1, y1, x2, y2), shape)
     mean = float(np.mean(pixels))
     std = float(np.std(pixels))
     median = float(np.median(pixels))
@@ -645,8 +863,7 @@ def roi_stats_for_frame(
     p01, p10, p50, p90, p99 = [float(v) for v in np.percentile(pixels, [1, 10, 50, 90, 99])]
     baseline_mean = _optional_float((baseline_stats or {}).get("mean", ""), "baseline mean") if baseline_stats else None
     baseline_std = _optional_float((baseline_stats or {}).get("std", ""), "baseline std") if baseline_stats else None
-    threshold_base = baseline_mean if baseline_mean is not None else mean
-    threshold = float(threshold_base) * HEM_THRESHOLD_MEAN_MULTIPLIER
+    threshold = _highlight_threshold(mean, baseline_mean, highlight_rule)
     highlight_pixels = pixels[pixels >= threshold]
     highlight_count = int(highlight_pixels.size)
     highlight_ratio = float(highlight_count / area) if area > 0 else 0.0
@@ -656,6 +873,7 @@ def roi_stats_for_frame(
         hem_z_count = int(np.count_nonzero(((pixels - baseline_mean) / baseline_std) >= HEM_Z_SCORE_THRESHOLD))
     stats = {
         "rect": _fmt_rect((x1, y1, x2, y2)),
+        "shape": shape,
         "width": str(width),
         "height": str(height),
         "area": str(area),
@@ -683,6 +901,7 @@ def roi_stats_for_frame(
         "std_delta": "",
         "median_delta": "",
         "highlight_area_delta": "",
+        "histogram": histogram,
     }
     if baseline_stats:
         baseline_mean = _optional_float(baseline_stats.get("mean", ""), "baseline mean")
@@ -706,12 +925,14 @@ def roi_stats_for_frame_set(
     frame: np.ndarray,
     roi_meta: dict[str, Any],
     baseline_stats: Optional[dict[str, dict[str, str]]] = None,
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
+    shapes = roi_meta.get("roi_shapes", {})
+    highlight_rule = roi_meta.get("highlight_rule")
     return {
-        "ROI1": roi_stats_for_frame(frame, roi_meta["roi1_rect"], (baseline_stats or {}).get("ROI1")),
-        "ROI2": roi_stats_for_frame(frame, roi_meta["roi2_rect"], (baseline_stats or {}).get("ROI2")),
-        "ROI3": roi_stats_for_frame(frame, roi_meta["roi3_rect"], (baseline_stats or {}).get("ROI3")),
-        "ROI4": roi_stats_for_frame(frame, roi_meta["roi4_rect"], (baseline_stats or {}).get("ROI4")),
+        "ROI1": roi_stats_for_frame(frame, roi_meta["roi1_rect"], (baseline_stats or {}).get("ROI1"), shapes.get("ROI1", "rectangle"), highlight_rule),
+        "ROI2": roi_stats_for_frame(frame, roi_meta["roi2_rect"], (baseline_stats or {}).get("ROI2"), shapes.get("ROI2", "rectangle"), highlight_rule),
+        "ROI3": roi_stats_for_frame(frame, roi_meta["roi3_rect"], (baseline_stats or {}).get("ROI3"), shapes.get("ROI3", "rectangle"), highlight_rule),
+        "ROI4": roi_stats_for_frame(frame, roi_meta["roi4_rect"], (baseline_stats or {}).get("ROI4"), shapes.get("ROI4", "rectangle"), highlight_rule),
     }
 
 
@@ -744,6 +965,44 @@ def _draw_scaled_rect(
     y2 = max(y1 + 1, y2 - 1)
     draw.rectangle((x1, y1, x2, y2), outline=color, width=width)
     draw.text((x1 + 4, y1 + 4), label, fill=color)
+
+
+def _draw_scaled_roi_shape(
+    draw: ImageDraw.ImageDraw,
+    rect: tuple[int, int, int, int],
+    shape: str,
+    scale: float,
+    color: tuple[int, int, int],
+    width: int,
+    label: str,
+) -> None:
+    x1, y1, x2, y2 = _scale_rect(rect, scale)
+    x2 = max(x1 + 1, x2 - 1)
+    y2 = max(y1 + 1, y2 - 1)
+    if _normalize_roi_shape(shape, label) == "ellipse":
+        draw.ellipse((x1, y1, x2, y2), outline=color, width=width)
+    else:
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=width)
+    draw.text((x1 + 4, y1 + 4), label, fill=color)
+
+
+def render_roi_histogram_image(histogram: list[int], size: tuple[int, int] = (260, 48)) -> Image.Image:
+    width, height = size
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(210, 210, 210), width=1)
+    values = [int(v or 0) for v in histogram[:256]]
+    if len(values) < 256:
+        values.extend([0] * (256 - len(values)))
+    max_count = max(values) if values else 0
+    if max_count <= 0:
+        return image
+    plot_height = max(1, height - 4)
+    for bin_index, count in enumerate(values):
+        x = int(round(bin_index * (width - 1) / 255))
+        bar_height = int(round((count / max_count) * plot_height))
+        draw.line((x, height - 2, x, height - 2 - bar_height), fill=(80, 120, 180))
+    return image
 
 
 def render_sequence_preview_image(
@@ -781,14 +1040,15 @@ def render_sequence_preview_image(
         image = image.resize((int(round(original_width * scale)), int(round(original_height * scale))), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
     overlay_width = max(2, int(round(3 * scale)))
+    shapes = roi_meta.get("roi_shapes", {})
     if show_roi1:
-        _draw_scaled_rect(draw, roi_meta["roi1_rect"], scale, ROI1_COLOR, overlay_width, "ROI1")
+        _draw_scaled_roi_shape(draw, roi_meta["roi1_rect"], shapes.get("ROI1", "rectangle"), scale, ROI1_COLOR, overlay_width, "ROI1")
     if show_roi4 and roi_meta["roi4_rect"] is not None:
-        _draw_scaled_rect(draw, roi_meta["roi4_rect"], scale, ROI4_COLOR, overlay_width, "ROI4")
+        _draw_scaled_roi_shape(draw, roi_meta["roi4_rect"], shapes.get("ROI4", "rectangle"), scale, ROI4_COLOR, overlay_width, "ROI4")
     if show_roi3:
-        _draw_scaled_rect(draw, roi_meta["roi3_rect"], scale, ROI3_COLOR, overlay_width, "ROI3")
+        _draw_scaled_roi_shape(draw, roi_meta["roi3_rect"], shapes.get("ROI3", "rectangle"), scale, ROI3_COLOR, overlay_width, "ROI3")
     if show_roi2:
-        _draw_scaled_rect(draw, roi_meta["roi2_rect"], scale, ROI2_COLOR, overlay_width, "ROI2")
+        _draw_scaled_roi_shape(draw, roi_meta["roi2_rect"], shapes.get("ROI2", "rectangle"), scale, ROI2_COLOR, overlay_width, "ROI2")
     if show_focus:
         _draw_focus_cross(draw, _scale_point(focus_anchor, scale), radius=max(7, int(round(7 * scale))))
     meta = {
@@ -904,12 +1164,21 @@ def resolve_roi_rects(
         roi1_rect = _validate_roi_rect_for_image(roi1_rect, width, height, "ROI1")
     else:
         roi1_rect = (0, 0, width, height)
+    roi_shapes = {
+        roi_name: _normalize_roi_shape(
+            (config.roi_definitions.get(roi_name) or {}).get("shape", "rectangle"),
+            roi_name,
+        )
+        for roi_name in ROI_NAMES
+    }
     return {
         "offset_anchor": offset_anchor,
         "roi1_rect": roi1_rect,
         "roi2_rect": roi2_rect,
         "roi3_rect": roi3_rect,
         "roi4_rect": roi4_rect,
+        "roi_shapes": roi_shapes,
+        "highlight_rule": _normalize_highlight_rule(config.highlight_rule),
     }
 
 
@@ -1020,6 +1289,146 @@ def analyze_root(
     return summary_rows
 
 
+def _excel_stats_headers() -> list[str]:
+    fields = [
+        "sequence",
+        "frame_index",
+        "frame",
+        "roi",
+        "shape",
+        "rect",
+        "width",
+        "height",
+        "area",
+        "mean",
+        "density",
+        "std",
+        "median",
+        "median_abs_deviation",
+        "p10",
+        "p90",
+        "threshold",
+        "highlight_count",
+        "highlight_area",
+        "highlight_ratio",
+        "highlight_std",
+        "hem_z_area",
+        "mean_delta",
+        "mean_delta_pct",
+        "std_delta",
+        "median_delta",
+        "highlight_area_delta",
+    ]
+    return fields
+
+
+def _excel_cell_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return ",".join(str(v) for v in value)
+    if value == "":
+        return ""
+    if isinstance(value, str):
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
+def export_sequence_excel(
+    sequence_dir: Path,
+    config: AnalyzerConfig,
+    focus_points: dict[str, Any],
+    output_path: Path,
+) -> Path:
+    from openpyxl import Workbook
+
+    frame_paths = list_frame_paths(sequence_dir, config.include_selected_debug)
+    if not frame_paths:
+        raise ValueError(f"sequence has no PNG frames: {sequence_dir}")
+    before_index = int(config.before_frame_index) - 1
+    if before_index < 0 or before_index >= len(frame_paths):
+        raise ValueError(
+            f"before_frame_index out of range for sequence {sequence_dir.name}: "
+            f"{config.before_frame_index} not in 1..{len(frame_paths)}"
+        )
+
+    focus_anchor = resolve_sequence_focus(sequence_dir.name, config, focus_points)
+    baseline_frame = load_frame(frame_paths[before_index])
+    roi_meta = resolve_roi_rects(baseline_frame, focus_anchor, config, include_roi3=True, include_roi4=True)
+    baseline_stats = roi_stats_for_frame_set(baseline_frame, roi_meta)
+    summary_row, _frame_rows = analyze_sequence(sequence_dir, config, focus_points)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook(write_only=False)
+    summary_sheet = workbook.active
+    summary_sheet.title = "Summary"
+    summary_sheet.append(["字段", "值"])
+    summary_sheet.append(["sequence", sequence_dir.name])
+    summary_sheet.append(["frame_count", len(frame_paths)])
+    summary_sheet.append(["before_frame_index", config.before_frame_index])
+    summary_sheet.append(["before_frame", frame_paths[before_index].name])
+    summary_sheet.append(["highlight_mode", _normalize_highlight_rule(config.highlight_rule)["mode"]])
+    summary_sheet.append(["fixed_gray", _normalize_highlight_rule(config.highlight_rule)["fixed_gray"]])
+    summary_sheet.append(["baseline_multiplier", _normalize_highlight_rule(config.highlight_rule)["baseline_multiplier"]])
+    summary_sheet.append(["roi2_color", summary_row["roi2_color"]])
+    summary_sheet.append(["roi2_diff", summary_row["roi2_diff"]])
+    summary_sheet.append(["summary_csv", str(config.output_csv)])
+
+    stats_sheet = workbook.create_sheet("Frame_ROI_Stats")
+    stats_headers = _excel_stats_headers()
+    stats_sheet.append(stats_headers)
+
+    histogram_sheet = workbook.create_sheet("Histograms")
+    histogram_headers = ["sequence", "frame_index", "frame", "roi"] + [f"gray_{index}" for index in range(256)]
+    histogram_sheet.append(histogram_headers)
+
+    config_sheet = workbook.create_sheet("ROI_Config")
+    config_sheet.append(["roi", "shape", "x", "y", "width", "height", "highlight_mode", "fixed_gray", "baseline_multiplier"])
+    highlight_rule = _normalize_highlight_rule(config.highlight_rule)
+    for roi_name in ROI_NAMES:
+        rect = roi_meta.get(f"{roi_name.lower()}_rect")
+        if rect is None:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in rect]
+        config_sheet.append(
+            [
+                roi_name,
+                roi_meta["roi_shapes"].get(roi_name, "rectangle"),
+                x1,
+                y1,
+                x2 - x1,
+                y2 - y1,
+                highlight_rule["mode"],
+                highlight_rule["fixed_gray"],
+                highlight_rule["baseline_multiplier"],
+            ]
+        )
+
+    for frame_index, frame_path in enumerate(frame_paths, start=1):
+        frame = load_frame(frame_path)
+        stats_by_roi = roi_stats_for_frame_set(frame, roi_meta, baseline_stats)
+        for roi_name in ROI_NAMES:
+            stats = stats_by_roi[roi_name]
+            stats_row = {
+                "sequence": sequence_dir.name,
+                "frame_index": frame_index,
+                "frame": frame_path.name,
+                "roi": roi_name,
+                **stats,
+            }
+            stats_sheet.append([_excel_cell_value(stats_row.get(header, "")) for header in stats_headers])
+            histogram_sheet.append(
+                [sequence_dir.name, frame_index, frame_path.name, roi_name]
+                + [int(value) for value in stats.get("histogram", [0] * 256)]
+            )
+
+    workbook.save(output_path)
+    return output_path
+
+
 def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     parser = argparse.ArgumentParser(description="Batch analyze HEM ROI2 gray-difference metrics for treatment sequences.")
     parser.add_argument("--root", required=True, help="Root directory containing one treatment sequence per child folder.")
@@ -1048,6 +1457,7 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     )
     roi2_params = _parse_roi2_params(args.roi2_extension_params, settings)
     roi4_rect = _settings_roi4_rect(settings)
+    roi_definitions = _settings_roi_definitions(settings)
     difference_threshold = (
         float(args.difference_threshold)
         if args.difference_threshold is not None
@@ -1071,6 +1481,10 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         roi3_extension_params=_settings_roi3_params(settings),
         roi4_rect=roi4_rect,
         roi4_bottom_region_ratio=_settings_roi4_bottom_region_ratio(settings) if roi4_rect is None else None,
+        roi_rect_overrides=_roi_rect_overrides_from_definitions(roi_definitions),
+        roi_definitions=roi_definitions,
+        highlight_rule=_settings_highlight_rule(settings),
+        excel_output_dir=_settings_excel_output_dir(settings),
     )
 
 
@@ -1100,7 +1514,9 @@ class HemRoi2BatchAnalyzerGui:
         roi3 = _settings_roi3_params(settings)
         roi4_rect = _settings_roi4_rect(settings)
         roi4_ratio = _settings_roi4_bottom_region_ratio(settings) if roi4_rect is None else None
-        roi_rect_overrides = _settings_roi_rect_overrides(settings)
+        roi_definitions = _settings_roi_definitions(settings)
+        roi_rect_overrides = _roi_rect_overrides_from_definitions(roi_definitions)
+        highlight_rule = _settings_highlight_rule(settings)
         self.roi2_left = tk.StringVar(value=str(roi2["left"]))
         self.roi2_right = tk.StringVar(value=str(roi2["right"]))
         self.roi2_top = tk.StringVar(value=str(roi2["top"]))
@@ -1128,6 +1544,14 @@ class HemRoi2BatchAnalyzerGui:
             }
             for roi_name in ROI_NAMES
         }
+        self.roi_shape_vars = {
+            roi_name: tk.StringVar(value=ROI_SHAPE_DISPLAY[(roi_definitions.get(roi_name) or {}).get("shape", "rectangle")])
+            for roi_name in ROI_NAMES
+        }
+        self.highlight_mode = tk.StringVar(value=HIGHLIGHT_MODE_DISPLAY[highlight_rule["mode"]])
+        self.highlight_fixed_gray = tk.StringVar(value=str(highlight_rule["fixed_gray"]))
+        self.highlight_baseline_multiplier = tk.StringVar(value=str(highlight_rule["baseline_multiplier"]))
+        self.excel_output_dir = tk.StringVar(value=str(_settings_excel_output_dir(settings)))
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
         self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
@@ -1158,6 +1582,8 @@ class HemRoi2BatchAnalyzerGui:
         self._photo_image = None
         self._roi_stat_vars: dict[str, dict[str, Any]] = {}
         self._roi_rect_entry_vars: dict[str, dict[str, Any]] = {}
+        self._roi_histogram_labels: dict[str, Any] = {}
+        self._roi_histogram_images: dict[str, Any] = {}
         self._settings_window = None
         self._preview_refresh_after_id = None
         self._preview_resize_after_id = None
@@ -1187,12 +1613,13 @@ class HemRoi2BatchAnalyzerGui:
         self.analyze_button.pack(side="left", padx=(8, 0))
         self.next_button = ttk.Button(buttons, text="下一个序列", command=self.next_sequence)
         self.next_button.pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="导出当前序列Excel", command=self.export_current_sequence_excel).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI1", variable=self.show_roi1, command=self.refresh_preview).pack(side="left", padx=(20, 0))
         ttk.Checkbutton(buttons, text="显示ROI2", variable=self.show_roi2, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI3", variable=self.show_roi3, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI4", variable=self.show_roi4, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示焦点", variable=self.show_focus, command=self.refresh_preview).pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="保存ROI区域", command=self.save_roi_rect_settings).pack(side="left", padx=(12, 0))
+        ttk.Button(buttons, text="保存ROI/高亮设置", command=self.save_roi_rect_settings).pack(side="left", padx=(12, 0))
         ttk.Label(buttons, textvariable=self.sequence_info).pack(side="right")
         self.run_button = self.analyze_button
 
@@ -1244,19 +1671,31 @@ class HemRoi2BatchAnalyzerGui:
             panel.rowconfigure(row, weight=1)
             rect_vars = self.roi_rect_vars[roi_name]
             self._roi_rect_entry_vars[roi_name] = rect_vars
+            ttk.Label(card, text="形状", font=stat_font).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=(0, 3))
+            ttk.Combobox(
+                card,
+                textvariable=self.roi_shape_vars[roi_name],
+                values=tuple(ROI_SHAPE_LABELS.keys()),
+                state="readonly",
+                width=6,
+                font=stat_font,
+            ).grid(row=0, column=1, columnspan=3, sticky="ew", padx=(0, 5), pady=(0, 3))
             for col, (label, field_name) in enumerate((("X", "x"), ("Y", "y"), ("宽", "width"), ("高", "height"))):
-                ttk.Label(card, text=label, font=stat_font).grid(row=0, column=col * 2, sticky="w", padx=(0, 2), pady=(0, 3))
+                ttk.Label(card, text=label, font=stat_font).grid(row=1, column=col * 2, sticky="w", padx=(0, 2), pady=(0, 3))
                 ttk.Entry(card, textvariable=rect_vars[field_name], width=6, font=stat_font).grid(
-                    row=0,
+                    row=1,
                     column=col * 2 + 1,
                     sticky="ew",
                     padx=(0, 5),
                     pady=(0, 3),
                 )
+            histogram_label = ttk.Label(card)
+            histogram_label.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(0, 3))
+            self._roi_histogram_labels[roi_name] = histogram_label
             values = {field: self.tk.StringVar(value="-") for field, _label in ROI_STAT_DISPLAY_FIELDS}
             self._roi_stat_vars[roi_name] = values
             for field_index, (field, label) in enumerate(ROI_STAT_DISPLAY_FIELDS):
-                row_index = field_index + 1
+                row_index = field_index + 3
                 ttk.Label(card, text=label, font=stat_font).grid(row=row_index, column=0, columnspan=3, sticky="w", pady=ROI_STATS_ROW_PADDING)
                 ttk.Label(card, textvariable=values[field], font=stat_font).grid(
                     row=row_index,
@@ -1303,6 +1742,7 @@ class HemRoi2BatchAnalyzerGui:
         row = self._path_row(paths, row, "逐帧CSV", self.per_frame_csv, "save_csv")
         row = self._path_row(paths, row, "配置JSON", self.settings_path, "file")
         row = self._path_row(paths, row, "焦点CSV", self.focus_points_csv, "file")
+        row = self._path_row(paths, row, "Excel导出目录", self.excel_output_dir, "dir")
 
         focus = ttk.LabelFrame(content, text="焦点设置", padding=8)
         focus.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -1389,7 +1829,18 @@ class HemRoi2BatchAnalyzerGui:
             row=row, column=1, sticky="w", pady=4
         )
         row += 1
-        self._entry_row(analysis, row, "最大序列数", self.max_sequences, "可选，用于小样本试跑")
+        row = self._entry_row(analysis, row, "最大序列数", self.max_sequences, "可选，用于小样本试跑")
+        ttk.Label(analysis, text="高亮模式").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            analysis,
+            textvariable=self.highlight_mode,
+            values=tuple(HIGHLIGHT_MODE_LABELS.keys()),
+            state="readonly",
+            width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+        row = self._entry_row(analysis, row, "固定灰度阈值", self.highlight_fixed_gray, "0~255，固定灰度值模式生效")
+        self._entry_row(analysis, row, "基线倍数", self.highlight_baseline_multiplier, "基线倍数模式生效")
 
         actions = ttk.Frame(content)
         actions.grid(row=6, column=0, sticky="ew", pady=(10, 0))
@@ -1485,6 +1936,14 @@ class HemRoi2BatchAnalyzerGui:
         for roi_name in ROI_NAMES:
             for field_name in ROI_RECT_FIELDS:
                 live_preview_vars.append(self.roi_rect_vars[roi_name][field_name])
+            live_preview_vars.append(self.roi_shape_vars[roi_name])
+        live_preview_vars.extend(
+            [
+                self.highlight_mode,
+                self.highlight_fixed_gray,
+                self.highlight_baseline_multiplier,
+            ]
+        )
         source_vars = [
             self.root_dir,
             self.include_selected_debug,
@@ -1494,6 +1953,7 @@ class HemRoi2BatchAnalyzerGui:
             self.output_csv,
             self.per_frame_csv,
             self.settings_path,
+            self.excel_output_dir,
             self.difference_threshold,
             self.before_frame_index,
             self.after_strategy,
@@ -1562,6 +2022,12 @@ class HemRoi2BatchAnalyzerGui:
             for roi_name in ROI_NAMES
         }
 
+    def _roi_shape_inputs_from_vars(self) -> dict[str, str]:
+        return {
+            roi_name: ROI_SHAPE_LABELS.get(self.roi_shape_vars[roi_name].get(), self.roi_shape_vars[roi_name].get())
+            for roi_name in ROI_NAMES
+        }
+
     def save_roi_rect_settings(self) -> None:
         from tkinter import messagebox
 
@@ -1570,19 +2036,23 @@ class HemRoi2BatchAnalyzerGui:
             settings_path = _optional_path(state.settings_path)
             if settings_path is None:
                 raise ValueError("请先设置配置JSON路径")
-            overrides = {
-                roi_name: _roi_rect_from_input_values(state.roi_rect_inputs.get(roi_name, {}), roi_name)
-                for roi_name in ROI_NAMES
-            }
-            save_roi_rect_overrides(settings_path, overrides)
+            definitions = _roi_definitions_from_inputs(state.roi_rect_inputs, state.roi_shape_inputs)
+            highlight_rule = _normalize_highlight_rule(
+                {
+                    "mode": state.highlight_mode,
+                    "fixed_gray": state.highlight_fixed_gray,
+                    "baseline_multiplier": state.highlight_baseline_multiplier,
+                }
+            )
+            save_visual_analysis_settings(settings_path, definitions, highlight_rule, Path(state.excel_output_dir))
             config = config_from_gui_state(state)
         except Exception as exc:
-            self.status.set(f"保存ROI区域失败：{exc}")
-            messagebox.showerror("保存ROI区域失败", str(exc))
+            self.status.set(f"保存ROI/高亮设置失败：{exc}")
+            messagebox.showerror("保存ROI/高亮设置失败", str(exc))
             return
         self._step_config_key = self._config_key(config)
         self.refresh_preview()
-        self.status.set(f"ROI区域已保存到 {settings_path}，当前预览已刷新。")
+        self.status.set(f"ROI/高亮设置已保存到 {settings_path}，当前预览已刷新。")
 
     def current_state(self) -> GuiState:
         self._sync_focus_point_from_xy(strict=True)
@@ -1614,6 +2084,11 @@ class HemRoi2BatchAnalyzerGui:
             roi4_height=self.roi4_height.get(),
             roi4_bottom_region_ratio=self.roi4_bottom_region_ratio.get(),
             roi_rect_inputs=self._roi_rect_inputs_from_vars(),
+            roi_shape_inputs=self._roi_shape_inputs_from_vars(),
+            highlight_mode=HIGHLIGHT_MODE_LABELS.get(self.highlight_mode.get(), self.highlight_mode.get()),
+            highlight_fixed_gray=self.highlight_fixed_gray.get(),
+            highlight_baseline_multiplier=self.highlight_baseline_multiplier.get(),
+            excel_output_dir=self.excel_output_dir.get(),
         )
 
     def load_settings_defaults(self) -> None:
@@ -1647,11 +2122,18 @@ class HemRoi2BatchAnalyzerGui:
                 self.roi4_bottom_region_ratio.set("")
             self.difference_threshold.set(str(_settings_difference_threshold(settings)))
             self.focus_y_offset_mm.set(str(_settings_focus_y_offset(settings)))
-            roi_rect_overrides = _settings_roi_rect_overrides(settings)
+            roi_definitions = _settings_roi_definitions(settings)
             for roi_name in ROI_NAMES:
-                values = _rect_to_input_values(roi_rect_overrides.get(roi_name))
+                definition = roi_definitions.get(roi_name, {})
+                values = _rect_to_input_values(definition.get("rect"))
                 for field_name in ROI_RECT_FIELDS:
                     self.roi_rect_vars[roi_name][field_name].set(values[field_name])
+                self.roi_shape_vars[roi_name].set(ROI_SHAPE_DISPLAY[definition.get("shape", "rectangle")])
+            highlight_rule = _settings_highlight_rule(settings)
+            self.highlight_mode.set(HIGHLIGHT_MODE_DISPLAY[highlight_rule["mode"]])
+            self.highlight_fixed_gray.set(str(highlight_rule["fixed_gray"]))
+            self.highlight_baseline_multiplier.set(str(highlight_rule["baseline_multiplier"]))
+            self.excel_output_dir.set(str(_settings_excel_output_dir(settings)))
             self.status.set("配置默认值已加载。")
         except Exception as exc:
             self.status.set(f"加载配置失败：{exc}")
@@ -1672,6 +2154,12 @@ class HemRoi2BatchAnalyzerGui:
             config.roi4_rect,
             config.roi4_bottom_region_ratio,
             tuple((roi_name, tuple(rect)) for roi_name, rect in sorted(config.roi_rect_overrides.items())),
+            tuple(
+                (roi_name, config.roi_definitions.get(roi_name, {}).get("shape", "rectangle"))
+                for roi_name in ROI_NAMES
+            ),
+            tuple(sorted((str(k), str(v)) for k, v in _normalize_highlight_rule(config.highlight_rule).items())),
+            str(config.excel_output_dir),
             config.difference_threshold,
             config.before_frame_index,
             config.after_strategy,
@@ -1728,6 +2216,8 @@ class HemRoi2BatchAnalyzerGui:
         self.image_label.configure(image=self._photo_image, text="")
 
     def _update_roi_stats_panel(self, meta: dict[str, Any]) -> None:
+        from PIL import ImageTk
+
         stat_vars = getattr(self, "_roi_stat_vars", {})
         stats_by_roi = meta.get("roi_stats", {})
         for roi_name, values in stat_vars.items():
@@ -1735,6 +2225,12 @@ class HemRoi2BatchAnalyzerGui:
             width = stats.get("width") or ""
             height = stats.get("height") or ""
             size = f"{width} × {height}" if width and height else "-"
+            histogram = stats.get("histogram", [0] * 256)
+            if roi_name in getattr(self, "_roi_histogram_labels", {}):
+                image = render_roi_histogram_image(histogram)
+                photo = ImageTk.PhotoImage(image)
+                self._roi_histogram_images[roi_name] = photo
+                self._roi_histogram_labels[roi_name].configure(image=photo)
             for field, var in values.items():
                 if field == "size":
                     var.set(size)
@@ -1871,6 +2367,26 @@ class HemRoi2BatchAnalyzerGui:
         except Exception as exc:
             self.status.set(f"切换序列失败：{exc}")
             messagebox.showerror("切换序列失败", str(exc))
+
+    def export_current_sequence_excel(self) -> None:
+        from tkinter import messagebox
+
+        try:
+            config = config_from_gui_state(self.current_state())
+            sequence_dir = self._current_sequence_dir()
+            if sequence_dir is None:
+                raise ValueError("未选择当前序列")
+            if not self._current_frame_paths:
+                self._load_current_frame_paths(config)
+            focus_points = load_focus_points_csv(config.focus_points_csv)
+            output_path = Path(config.excel_output_dir) / f"{sequence_dir.name}.xlsx"
+            saved_path = export_sequence_excel(sequence_dir, config, focus_points, output_path)
+        except Exception as exc:
+            self.status.set(f"导出Excel失败：{exc}")
+            messagebox.showerror("导出Excel失败", str(exc))
+            return
+        self.status.set(f"当前序列Excel已导出：{saved_path}")
+        messagebox.showinfo("导出Excel完成", f"已导出：{saved_path}")
 
     def run_analysis(self) -> None:
         from tkinter import messagebox

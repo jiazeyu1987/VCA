@@ -358,6 +358,62 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(stats["median_delta"], "20.000000")
         self.assertEqual(stats["highlight_area_delta"], "9")
 
+    def test_roi_histogram_counts_rectangle_gray_bins(self):
+        values = np.asarray([[0, 1], [1, 255]], dtype=np.uint8)
+        frame = np.repeat(values[:, :, None], 3, axis=2)
+
+        histogram = analyzer.roi_gray_histogram(frame, (0, 0, 2, 2), shape="rectangle")
+        stats = analyzer.roi_stats_for_frame(frame, (0, 0, 2, 2), shape="rectangle")
+
+        self.assertEqual(len(histogram), 256)
+        self.assertEqual(histogram[0], 1)
+        self.assertEqual(histogram[1], 2)
+        self.assertEqual(histogram[255], 1)
+        self.assertEqual(sum(histogram), 4)
+        self.assertEqual(stats["histogram"][1], 2)
+
+    def test_ellipse_roi_uses_masked_pixels_for_stats_and_histogram(self):
+        values = np.arange(25, dtype=np.uint8).reshape((5, 5))
+        frame = np.repeat(values[:, :, None], 3, axis=2)
+
+        rectangle = analyzer.roi_stats_for_frame(frame, (0, 0, 5, 5), shape="rectangle")
+        ellipse = analyzer.roi_stats_for_frame(frame, (0, 0, 5, 5), shape="ellipse")
+
+        self.assertEqual(rectangle["area"], "25")
+        self.assertLess(int(ellipse["area"]), 25)
+        self.assertEqual(sum(ellipse["histogram"]), int(ellipse["area"]))
+
+    def test_fixed_gray_highlight_rule_counts_threshold_pixels(self):
+        values = np.asarray([[9, 10, 11]], dtype=np.uint8)
+        frame = np.repeat(values[:, :, None], 3, axis=2)
+
+        stats = analyzer.roi_stats_for_frame(
+            frame,
+            (0, 0, 3, 1),
+            highlight_rule={"mode": "fixed_gray", "fixed_gray": 10, "baseline_multiplier": 1.15},
+        )
+
+        self.assertEqual(stats["threshold"], "10.000000")
+        self.assertEqual(stats["highlight_count"], "2")
+
+    def test_baseline_multiplier_highlight_rule_uses_baseline_mean(self):
+        baseline = np.full((1, 3), 10, dtype=np.uint8)
+        current = np.asarray([[14, 15, 16]], dtype=np.uint8)
+        baseline_frame = np.repeat(baseline[:, :, None], 3, axis=2)
+        current_frame = np.repeat(current[:, :, None], 3, axis=2)
+        rule = {"mode": "baseline_multiplier", "fixed_gray": 93, "baseline_multiplier": 1.5}
+        baseline_stats = analyzer.roi_stats_for_frame(baseline_frame, (0, 0, 3, 1), highlight_rule=rule)
+
+        stats = analyzer.roi_stats_for_frame(
+            current_frame,
+            (0, 0, 3, 1),
+            baseline_stats=baseline_stats,
+            highlight_rule=rule,
+        )
+
+        self.assertEqual(stats["threshold"], "15.000000")
+        self.assertEqual(stats["highlight_count"], "2")
+
     def test_render_sequence_preview_scales_up_to_available_area(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -630,6 +686,14 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
             for roi_name in analyzer.ROI_NAMES
         }
+        gui.roi_shape_vars = {
+            roi_name: FakeVar("矩形")
+            for roi_name in analyzer.ROI_NAMES
+        }
+        gui.highlight_mode = FakeVar("基线倍数")
+        gui.highlight_fixed_gray = FakeVar("93")
+        gui.highlight_baseline_multiplier = FakeVar("1.15")
+        gui.excel_output_dir = FakeVar("excel")
         gui.difference_threshold = FakeVar("0.5")
         gui.before_frame_index = FakeVar("1")
         gui.after_strategy = FakeVar("roi2_peak")
@@ -764,6 +828,83 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(tool_settings["roi_rect_overrides"]["ROI2"], {"x": 10, "y": 11, "width": 20, "height": 30})
             self.assertNotIn("ROI3", tool_settings["roi_rect_overrides"])
             self.assertEqual(analyzer._settings_roi_rect_overrides(settings)["ROI4"], (30, 31, 50, 61))
+
+    def test_save_roi_definitions_and_highlight_rule_persist_tool_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings_path = Path(tmp) / "settings.json"
+            settings_path.write_text('{"peak_detect": {"difference_threshold": 0.5}}', encoding="utf-8")
+            definitions = {
+                "ROI1": {"shape": "ellipse", "rect": (1, 2, 31, 42)},
+                "ROI2": {"shape": "rectangle", "rect": (10, 11, 30, 41)},
+            }
+            highlight_rule = {"mode": "fixed_gray", "fixed_gray": 93, "baseline_multiplier": 1.15}
+
+            analyzer.save_visual_analysis_settings(settings_path, definitions, highlight_rule, Path("exports"))
+            settings = analyzer._load_settings(settings_path)
+
+            self.assertEqual(
+                analyzer._settings_roi_definitions(settings)["ROI1"],
+                {"shape": "ellipse", "rect": (1, 2, 31, 42)},
+            )
+            self.assertEqual(analyzer._settings_highlight_rule(settings), highlight_rule)
+            self.assertEqual(analyzer._settings_excel_output_dir(settings), Path("exports"))
+
+    def test_export_sequence_excel_writes_roi_stats_and_histograms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq_a"
+            seq.mkdir()
+            frame_a = np.full((20, 20, 3), 10, dtype=np.uint8)
+            frame_b = np.full((20, 20, 3), 20, dtype=np.uint8)
+            Image.fromarray(frame_a).save(seq / "00001_2026-06-14_00-00-00.000_frame.png")
+            Image.fromarray(frame_b).save(seq / "00002_2026-06-14_00-00-00.070_frame.png")
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(10, 10)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 2, "bottom": 2},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+                roi3_extension_params={"left": 2, "right": 2, "top": 2, "bottom": 2},
+                roi_rect_overrides={
+                    "ROI1": (0, 0, 4, 4),
+                    "ROI2": (5, 5, 9, 9),
+                    "ROI3": (10, 10, 14, 14),
+                    "ROI4": (15, 15, 19, 19),
+                },
+                roi_definitions={
+                    "ROI1": {"shape": "rectangle", "rect": (0, 0, 4, 4)},
+                    "ROI2": {"shape": "ellipse", "rect": (5, 5, 9, 9)},
+                    "ROI3": {"shape": "rectangle", "rect": (10, 10, 14, 14)},
+                    "ROI4": {"shape": "rectangle", "rect": (15, 15, 19, 19)},
+                },
+                highlight_rule={"mode": "fixed_gray", "fixed_gray": 15, "baseline_multiplier": 1.15},
+            )
+            output_path = root / "seq_a.xlsx"
+
+            analyzer.export_sequence_excel(seq, cfg, {}, output_path)
+
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(output_path, read_only=True, data_only=True)
+            self.assertEqual(set(workbook.sheetnames), {"Summary", "Frame_ROI_Stats", "Histograms", "ROI_Config"})
+            self.assertEqual(workbook["Frame_ROI_Stats"].max_row, 1 + 2 * 4)
+            self.assertEqual(workbook["Histograms"].max_row, 1 + 2 * 4)
+            histogram_headers = [cell.value for cell in next(workbook["Histograms"].iter_rows(min_row=1, max_row=1))]
+            self.assertIn("gray_0", histogram_headers)
+            self.assertIn("gray_255", histogram_headers)
+            first_histogram_row = [cell.value for cell in next(workbook["Histograms"].iter_rows(min_row=2, max_row=2))]
+            gray_values = first_histogram_row[4:]
+            self.assertEqual(sum(value or 0 for value in gray_values), 16)
+            workbook.close()
 
     def test_gui_default_maximize_uses_zoomed_state(self):
         class FakeRoot:
