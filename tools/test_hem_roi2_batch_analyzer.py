@@ -185,14 +185,67 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
                 max_sequences=None,
             )
 
-            hidden, hidden_meta = analyzer.render_sequence_preview_image(frame, seq.name, cfg, {}, False, False)
-            visible, visible_meta = analyzer.render_sequence_preview_image(frame, seq.name, cfg, {}, True, True)
+            hidden, hidden_meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                False,
+                False,
+                max_size=(200, 200),
+            )
+            visible, visible_meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                True,
+                True,
+                max_size=(200, 200),
+            )
 
             self.assertEqual(hidden_meta["focus_anchor"], (100, 100))
             self.assertEqual(hidden_meta["roi2_rect"], (95, 95, 105, 105))
             self.assertEqual(visible_meta["roi2_rect"], hidden_meta["roi2_rect"])
             self.assertNotEqual(visible.getpixel((95, 95)), hidden.getpixel((95, 95)))
             self.assertNotEqual(visible.getpixel((100, 100)), hidden.getpixel((100, 100)))
+
+    def test_render_sequence_preview_scales_up_to_available_area(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            frame = seq / "00001_2026-06-14_00-00-00.000_frame.png"
+            write_frame(frame, 10, size=(200, 100))
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(100, 50)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 5, "right": 5, "top": 5, "bottom": 5},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+            )
+
+            image, meta = analyzer.render_sequence_preview_image(
+                frame,
+                seq.name,
+                cfg,
+                {},
+                False,
+                False,
+                max_size=(800, 600),
+            )
+
+            self.assertEqual(image.size, (800, 400))
+            self.assertEqual(meta["scale"], 4.0)
 
     def test_gui_state_builds_analyzer_config(self):
         with tempfile.TemporaryDirectory() as tmp:

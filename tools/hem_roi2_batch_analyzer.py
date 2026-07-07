@@ -343,14 +343,17 @@ def render_sequence_preview_image(
     offset_anchor, roi2_rect = resolve_roi2_rect(frame, focus_anchor, config)
     image = Image.fromarray(frame).convert("RGB")
     original_width, original_height = image.size
-    scale = min(max_size[0] / original_width, max_size[1] / original_height, 1.0)
-    if scale < 1.0:
+    max_width = max(1, int(max_size[0]))
+    max_height = max(1, int(max_size[1]))
+    scale = min(max_width / original_width, max_height / original_height)
+    if scale != 1.0:
         image = image.resize((int(round(original_width * scale)), int(round(original_height * scale))), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
+    overlay_width = max(2, int(round(3 * scale)))
     if show_roi2:
-        draw.rectangle(_scale_rect(roi2_rect, scale), outline=(0, 255, 0), width=3)
+        draw.rectangle(_scale_rect(roi2_rect, scale), outline=(0, 255, 0), width=overlay_width)
     if show_focus:
-        _draw_focus_cross(draw, _scale_point(focus_anchor, scale))
+        _draw_focus_cross(draw, _scale_point(focus_anchor, scale), radius=max(7, int(round(7 * scale))))
     return image, {
         "focus_anchor": focus_anchor,
         "offset_anchor": offset_anchor,
@@ -607,6 +610,8 @@ class HemRoi2BatchAnalyzerGui:
         self._photo_image = None
         self._settings_window = None
         self._preview_refresh_after_id = None
+        self._preview_resize_after_id = None
+        self._last_preview_area_size = (0, 0)
         self._build_ui()
         self._install_setting_traces()
         self.root.after(0, self.load_sequences)
@@ -635,6 +640,7 @@ class HemRoi2BatchAnalyzerGui:
 
         self.image_label = ttk.Label(main, text="请先加载序列", anchor="center")
         self.image_label.grid(row=1, column=0, sticky="nsew", pady=(4, 6))
+        self.image_label.bind("<Configure>", self._on_preview_area_configure)
 
         timeline = ttk.Frame(main)
         timeline.grid(row=2, column=0, sticky="ew", pady=(4, 2))
@@ -989,6 +995,39 @@ class HemRoi2BatchAnalyzerGui:
         self._photo_image = ImageTk.PhotoImage(image)
         self.image_label.configure(image=self._photo_image, text="")
 
+    def _preview_max_size(self) -> tuple[int, int]:
+        try:
+            width = int(self.image_label.winfo_width())
+            height = int(self.image_label.winfo_height())
+        except Exception:
+            width, height = PREVIEW_MAX_SIZE
+        if width < 100 or height < 100:
+            try:
+                width = max(PREVIEW_MAX_SIZE[0], int(self.root.winfo_width()) - 24)
+                height = max(PREVIEW_MAX_SIZE[1], int(self.root.winfo_height()) - 130)
+            except Exception:
+                width, height = PREVIEW_MAX_SIZE
+        return max(100, width - 8), max(100, height - 8)
+
+    def _on_preview_area_configure(self, event) -> None:
+        if not self._current_frame_paths:
+            return
+        new_size = (int(event.width), int(event.height))
+        old_width, old_height = self._last_preview_area_size
+        if abs(new_size[0] - old_width) < 4 and abs(new_size[1] - old_height) < 4:
+            return
+        self._last_preview_area_size = new_size
+        if self._preview_resize_after_id is not None:
+            try:
+                self.root.after_cancel(self._preview_resize_after_id)
+            except Exception:
+                pass
+        self._preview_resize_after_id = self.root.after(120, self._refresh_preview_after_resize)
+
+    def _refresh_preview_after_resize(self) -> None:
+        self._preview_resize_after_id = None
+        self.refresh_preview()
+
     def refresh_preview(self) -> None:
         try:
             config = config_from_gui_state(self.current_state())
@@ -1006,6 +1045,7 @@ class HemRoi2BatchAnalyzerGui:
                 focus_points,
                 bool(self.show_roi2.get()),
                 bool(self.show_focus.get()),
+                max_size=self._preview_max_size(),
             )
             self._current_preview_meta = meta
             self._display_preview_image(image)
