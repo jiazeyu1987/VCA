@@ -33,6 +33,29 @@ ROI4_COLOR = api_server.ROI4_MARKER_COLOR
 FOCUS_COLOR = api_server.FOCUS_MARKER_COLOR
 ROI2_DEFAULT_PARAMS = {"left": 40, "right": 40, "top": 50, "bottom": 30}
 ROI3_DEFAULT_PARAMS = {"left": 30, "right": 30, "top": 50, "bottom": 100}
+HEM_THRESHOLD_MEAN_MULTIPLIER = 1.15
+HEM_Z_SCORE_THRESHOLD = 3.0
+
+ROI_STAT_DISPLAY_FIELDS = [
+    ("rect", "位置"),
+    ("size", "尺寸"),
+    ("area", "面积"),
+    ("mean", "平均灰度"),
+    ("density", "平均灰度密度"),
+    ("std", "灰度标准差"),
+    ("median", "灰度中位数"),
+    ("median_abs_deviation", "中位数绝对偏差"),
+    ("p10", "灰度P10"),
+    ("p90", "灰度P90"),
+    ("threshold", "高亮阈值"),
+    ("highlight_count", "高亮像素数"),
+    ("highlight_ratio", "高亮比例"),
+    ("highlight_std", "高亮像素标准差"),
+    ("hem_z_area", "HEM面积(z>=3)"),
+    ("mean_delta", "较基线均值差"),
+    ("mean_delta_pct", "较基线均值变化率"),
+    ("highlight_area_delta", "较基线高亮面积差"),
+]
 
 
 SUMMARY_FIELDS = [
@@ -421,25 +444,149 @@ def frame_roi2_mean(path: Path, roi2_rect: tuple[int, int, int, int]) -> float:
     return api_server.roi_gray_mean(frame, roi2_rect)
 
 
-def roi_stats_for_frame(frame: np.ndarray, rect: Optional[tuple[int, int, int, int]]) -> dict[str, str]:
+def _empty_roi_stats() -> dict[str, str]:
+    return {
+        "rect": "",
+        "width": "",
+        "height": "",
+        "area": "",
+        "mean": "",
+        "density": "",
+        "std": "",
+        "median": "",
+        "median_abs_deviation": "",
+        "skewness": "",
+        "kurtosis": "",
+        "p01": "",
+        "p10": "",
+        "p50": "",
+        "p90": "",
+        "p99": "",
+        "threshold": "",
+        "highlight_count": "",
+        "highlight_area": "",
+        "highlight_ratio": "",
+        "highlight_std": "",
+        "hem_z_count": "",
+        "hem_z_area": "",
+        "mean_delta": "",
+        "mean_delta_pct": "",
+        "std_delta": "",
+        "median_delta": "",
+        "highlight_area_delta": "",
+    }
+
+
+def _roi_gray_pixels(frame: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return np.asarray([], dtype=np.float64)
+    return api_server.gray_image(roi).astype(np.float64).reshape(-1)
+
+
+def roi_stats_for_frame(
+    frame: np.ndarray,
+    rect: Optional[tuple[int, int, int, int]],
+    baseline_stats: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
     if rect is None:
-        return {
-            "rect": "",
-            "width": "",
-            "height": "",
-            "area": "",
-            "mean": "",
-        }
+        return _empty_roi_stats()
     x1, y1, x2, y2 = [int(v) for v in rect]
     width = max(0, x2 - x1)
     height = max(0, y2 - y1)
     area = width * height
-    return {
+    pixels = _roi_gray_pixels(frame, (x1, y1, x2, y2))
+    if pixels.size == 0:
+        stats = _empty_roi_stats()
+        stats.update({
+            "rect": _fmt_rect((x1, y1, x2, y2)),
+            "width": str(width),
+            "height": str(height),
+            "area": str(area),
+        })
+        return stats
+    mean = float(np.mean(pixels))
+    std = float(np.std(pixels))
+    median = float(np.median(pixels))
+    median_abs_deviation = float(np.median(np.abs(pixels - median)))
+    centered = pixels - mean
+    if std > 0:
+        skewness = float(np.mean((centered / std) ** 3))
+        kurtosis = float(np.mean((centered / std) ** 4))
+    else:
+        skewness = 0.0
+        kurtosis = 0.0
+    p01, p10, p50, p90, p99 = [float(v) for v in np.percentile(pixels, [1, 10, 50, 90, 99])]
+    baseline_mean = _optional_float((baseline_stats or {}).get("mean", ""), "baseline mean") if baseline_stats else None
+    baseline_std = _optional_float((baseline_stats or {}).get("std", ""), "baseline std") if baseline_stats else None
+    threshold_base = baseline_mean if baseline_mean is not None else mean
+    threshold = float(threshold_base) * HEM_THRESHOLD_MEAN_MULTIPLIER
+    highlight_pixels = pixels[pixels >= threshold]
+    highlight_count = int(highlight_pixels.size)
+    highlight_ratio = float(highlight_count / area) if area > 0 else 0.0
+    highlight_std = float(np.std(highlight_pixels)) if highlight_count else 0.0
+    hem_z_count = 0
+    if baseline_mean is not None and baseline_std is not None and baseline_std > 0:
+        hem_z_count = int(np.count_nonzero(((pixels - baseline_mean) / baseline_std) >= HEM_Z_SCORE_THRESHOLD))
+    stats = {
         "rect": _fmt_rect((x1, y1, x2, y2)),
         "width": str(width),
         "height": str(height),
         "area": str(area),
-        "mean": _fmt_float(api_server.roi_gray_mean(frame, (x1, y1, x2, y2))),
+        "mean": _fmt_float(mean),
+        "density": _fmt_float(mean / 255.0),
+        "std": _fmt_float(std),
+        "median": _fmt_float(median),
+        "median_abs_deviation": _fmt_float(median_abs_deviation),
+        "skewness": _fmt_float(skewness),
+        "kurtosis": _fmt_float(kurtosis),
+        "p01": _fmt_float(p01),
+        "p10": _fmt_float(p10),
+        "p50": _fmt_float(p50),
+        "p90": _fmt_float(p90),
+        "p99": _fmt_float(p99),
+        "threshold": _fmt_float(threshold),
+        "highlight_count": str(highlight_count),
+        "highlight_area": str(highlight_count),
+        "highlight_ratio": _fmt_float(highlight_ratio),
+        "highlight_std": _fmt_float(highlight_std),
+        "hem_z_count": str(hem_z_count),
+        "hem_z_area": str(hem_z_count),
+        "mean_delta": "",
+        "mean_delta_pct": "",
+        "std_delta": "",
+        "median_delta": "",
+        "highlight_area_delta": "",
+    }
+    if baseline_stats:
+        baseline_mean = _optional_float(baseline_stats.get("mean", ""), "baseline mean")
+        baseline_std_value = _optional_float(baseline_stats.get("std", ""), "baseline std")
+        baseline_median = _optional_float(baseline_stats.get("median", ""), "baseline median")
+        baseline_highlight_area = _optional_int(baseline_stats.get("highlight_area", ""), "baseline highlight area")
+        if baseline_mean is not None:
+            stats["mean_delta"] = _fmt_float(mean - baseline_mean)
+            if baseline_mean != 0:
+                stats["mean_delta_pct"] = _fmt_float((mean - baseline_mean) / baseline_mean)
+        if baseline_std_value is not None:
+            stats["std_delta"] = _fmt_float(std - baseline_std_value)
+        if baseline_median is not None:
+            stats["median_delta"] = _fmt_float(median - baseline_median)
+        if baseline_highlight_area is not None:
+            stats["highlight_area_delta"] = str(highlight_count - baseline_highlight_area)
+    return stats
+
+
+def roi_stats_for_frame_set(
+    frame: np.ndarray,
+    roi_meta: dict[str, Any],
+    baseline_stats: Optional[dict[str, dict[str, str]]] = None,
+) -> dict[str, dict[str, str]]:
+    return {
+        "ROI1": roi_stats_for_frame(frame, roi_meta["roi1_rect"], (baseline_stats or {}).get("ROI1")),
+        "ROI2": roi_stats_for_frame(frame, roi_meta["roi2_rect"], (baseline_stats or {}).get("ROI2")),
+        "ROI3": roi_stats_for_frame(frame, roi_meta["roi3_rect"], (baseline_stats or {}).get("ROI3")),
+        "ROI4": roi_stats_for_frame(frame, roi_meta["roi4_rect"], (baseline_stats or {}).get("ROI4")),
     }
 
 
@@ -485,6 +632,7 @@ def render_sequence_preview_image(
     show_roi1: bool = False,
     show_roi3: bool = False,
     show_roi4: bool = False,
+    baseline_frame_path: Optional[Path] = None,
 ) -> tuple[Image.Image, dict[str, Any]]:
     frame = load_frame(frame_path)
     focus_anchor = resolve_sequence_focus(sequence_name, config, focus_points)
@@ -495,6 +643,10 @@ def render_sequence_preview_image(
         include_roi3=show_roi3,
         include_roi4=show_roi4,
     )
+    baseline_stats = None
+    if baseline_frame_path is not None:
+        baseline_frame = load_frame(baseline_frame_path)
+        baseline_stats = roi_stats_for_frame_set(baseline_frame, roi_meta)
     image = Image.fromarray(frame).convert("RGB")
     original_width, original_height = image.size
     max_width = max(1, int(max_size[0]))
@@ -518,12 +670,7 @@ def render_sequence_preview_image(
         "focus_anchor": focus_anchor,
         "scale": scale,
         "frame_path": frame_path,
-        "roi_stats": {
-            "ROI1": roi_stats_for_frame(frame, roi_meta["roi1_rect"]),
-            "ROI2": roi_stats_for_frame(frame, roi_meta["roi2_rect"]),
-            "ROI3": roi_stats_for_frame(frame, roi_meta["roi3_rect"]),
-            "ROI4": roi_stats_for_frame(frame, roi_meta["roi4_rect"]),
-        },
+        "roi_stats": roi_stats_for_frame_set(frame, roi_meta, baseline_stats),
     }
     meta.update(roi_meta)
     return image, meta
@@ -914,9 +1061,29 @@ class HemRoi2BatchAnalyzerGui:
 
     def _build_roi_stats_panel(self, parent) -> None:
         ttk = self.ttk
-        panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=10)
+        panel = ttk.LabelFrame(parent, text="ROI统计信息", padding=0)
         panel.grid(row=1, column=1, sticky="nsew", pady=(4, 6))
         panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
+
+        canvas = self.tk.Canvas(panel, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(panel, orient="vertical", command=canvas.yview)
+        content = ttk.Frame(canvas, padding=8)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        content.columnconfigure(0, weight=1)
+
+        def update_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def match_content_width(event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+
+        content.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", match_content_width)
+
         palette = {
             "ROI1": "红色，整帧/背景区域",
             "ROI2": "绿色，焦域ROI",
@@ -924,24 +1091,14 @@ class HemRoi2BatchAnalyzerGui:
             "ROI4": "橙色，HEM高亮/底部区域",
         }
         for row, roi_name in enumerate(("ROI1", "ROI2", "ROI3", "ROI4")):
-            card = ttk.LabelFrame(panel, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
+            card = ttk.LabelFrame(content, text=f"{roi_name}（{palette[roi_name]}）", padding=8)
             card.grid(row=row, column=0, sticky="ew", pady=(0, 8))
             card.columnconfigure(1, weight=1)
-            values = {
-                "rect": self.tk.StringVar(value="-"),
-                "size": self.tk.StringVar(value="-"),
-                "area": self.tk.StringVar(value="-"),
-                "mean": self.tk.StringVar(value="-"),
-            }
+            values = {field: self.tk.StringVar(value="-") for field, _label in ROI_STAT_DISPLAY_FIELDS}
             self._roi_stat_vars[roi_name] = values
-            ttk.Label(card, text="位置").grid(row=0, column=0, sticky="w", pady=2)
-            ttk.Label(card, textvariable=values["rect"]).grid(row=0, column=1, sticky="e", pady=2)
-            ttk.Label(card, text="尺寸").grid(row=1, column=0, sticky="w", pady=2)
-            ttk.Label(card, textvariable=values["size"]).grid(row=1, column=1, sticky="e", pady=2)
-            ttk.Label(card, text="面积").grid(row=2, column=0, sticky="w", pady=2)
-            ttk.Label(card, textvariable=values["area"]).grid(row=2, column=1, sticky="e", pady=2)
-            ttk.Label(card, text="灰度均值").grid(row=3, column=0, sticky="w", pady=2)
-            ttk.Label(card, textvariable=values["mean"]).grid(row=3, column=1, sticky="e", pady=2)
+            for field_index, (field, label) in enumerate(ROI_STAT_DISPLAY_FIELDS):
+                ttk.Label(card, text=label).grid(row=field_index, column=0, sticky="w", pady=1)
+                ttk.Label(card, textvariable=values[field]).grid(row=field_index, column=1, sticky="e", pady=1)
 
     def _build_menu(self) -> None:
         menu = self.tk.Menu(self.root)
@@ -1371,10 +1528,11 @@ class HemRoi2BatchAnalyzerGui:
             width = stats.get("width") or ""
             height = stats.get("height") or ""
             size = f"{width} × {height}" if width and height else "-"
-            values["rect"].set(stats.get("rect") or "-")
-            values["size"].set(size)
-            values["area"].set(stats.get("area") or "-")
-            values["mean"].set(stats.get("mean") or "-")
+            for field, var in values.items():
+                if field == "size":
+                    var.set(size)
+                else:
+                    var.set(stats.get(field) or "-")
 
     def _preview_max_size(self) -> tuple[int, int]:
         try:
@@ -1418,6 +1576,10 @@ class HemRoi2BatchAnalyzerGui:
             if not self._current_frame_paths:
                 self._load_current_frame_paths(config)
             frame_path = self._current_frame_paths[self._current_frame_index]
+            baseline_frame_path = None
+            baseline_index = int(config.before_frame_index) - 1
+            if 0 <= baseline_index < len(self._current_frame_paths):
+                baseline_frame_path = self._current_frame_paths[baseline_index]
             focus_points = load_focus_points_csv(config.focus_points_csv)
             image, meta = render_sequence_preview_image(
                 frame_path,
@@ -1430,6 +1592,7 @@ class HemRoi2BatchAnalyzerGui:
                 show_roi1=bool(self.show_roi1.get()),
                 show_roi3=bool(self.show_roi3.get()),
                 show_roi4=bool(self.show_roi4.get()),
+                baseline_frame_path=baseline_frame_path,
             )
             self._current_preview_meta = meta
             self._display_preview_image(image)

@@ -318,6 +318,46 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(stats["ROI3"]["rect"], "90,80,110,130")
             self.assertEqual(stats["ROI4"]["rect"], "0,150,200,200")
 
+    def test_roi_stats_for_frame_reports_ppt_gray_distribution_metrics(self):
+        values = np.arange(16, dtype=np.uint8).reshape((4, 4))
+        frame = np.repeat(values[:, :, None], 3, axis=2)
+
+        stats = analyzer.roi_stats_for_frame(frame, (0, 0, 4, 4))
+
+        self.assertEqual(stats["rect"], "0,0,4,4")
+        self.assertEqual(stats["area"], "16")
+        self.assertEqual(stats["mean"], "7.500000")
+        self.assertEqual(stats["density"], "0.029412")
+        self.assertEqual(stats["std"], "4.609772")
+        self.assertEqual(stats["median"], "7.500000")
+        self.assertEqual(stats["median_abs_deviation"], "4.000000")
+        self.assertEqual(stats["p10"], "1.500000")
+        self.assertEqual(stats["p90"], "13.500000")
+        self.assertEqual(stats["threshold"], "8.625000")
+        self.assertEqual(stats["highlight_count"], "7")
+        self.assertEqual(stats["highlight_area"], "7")
+        self.assertEqual(stats["highlight_ratio"], "0.437500")
+        self.assertEqual(stats["highlight_std"], "2.000000")
+
+    def test_roi_stats_for_frame_reports_baseline_and_hem_area_metrics(self):
+        baseline_values = np.arange(16, dtype=np.uint8).reshape((4, 4))
+        current_values = baseline_values + 20
+        baseline_frame = np.repeat(baseline_values[:, :, None], 3, axis=2)
+        current_frame = np.repeat(current_values[:, :, None], 3, axis=2)
+        baseline_stats = analyzer.roi_stats_for_frame(baseline_frame, (0, 0, 4, 4))
+
+        stats = analyzer.roi_stats_for_frame(current_frame, (0, 0, 4, 4), baseline_stats)
+
+        self.assertEqual(stats["threshold"], "8.625000")
+        self.assertEqual(stats["highlight_count"], "16")
+        self.assertEqual(stats["hem_z_count"], "14")
+        self.assertEqual(stats["hem_z_area"], "14")
+        self.assertEqual(stats["mean_delta"], "20.000000")
+        self.assertEqual(stats["mean_delta_pct"], "2.666667")
+        self.assertEqual(stats["std_delta"], "0.000000")
+        self.assertEqual(stats["median_delta"], "20.000000")
+        self.assertEqual(stats["highlight_area_delta"], "9")
+
     def test_render_sequence_preview_scales_up_to_available_area(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -619,14 +659,29 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
                 self.value = value
 
         gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        def fake_values():
+            return {field: FakeVar() for field, _label in analyzer.ROI_STAT_DISPLAY_FIELDS}
+
         gui._roi_stat_vars = {
-            "ROI1": {"rect": FakeVar(), "size": FakeVar(), "area": FakeVar(), "mean": FakeVar()},
-            "ROI2": {"rect": FakeVar(), "size": FakeVar(), "area": FakeVar(), "mean": FakeVar()},
+            "ROI1": fake_values(),
+            "ROI2": fake_values(),
         }
         gui._update_roi_stats_panel(
             {
                 "roi_stats": {
-                    "ROI1": {"rect": "0,0,200,100", "width": "200", "height": "100", "area": "20000", "mean": "10.000000"},
+                    "ROI1": {
+                        "rect": "0,0,200,100",
+                        "width": "200",
+                        "height": "100",
+                        "area": "20000",
+                        "mean": "10.000000",
+                        "std": "1.500000",
+                        "p90": "12.000000",
+                        "threshold": "11.500000",
+                        "highlight_ratio": "0.125000",
+                        "hem_z_area": "25",
+                        "mean_delta": "2.000000",
+                    },
                     "ROI2": {"rect": "", "width": "", "height": "", "area": "", "mean": ""},
                 }
             }
@@ -636,6 +691,12 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(gui._roi_stat_vars["ROI1"]["size"].value, "200 × 100")
         self.assertEqual(gui._roi_stat_vars["ROI1"]["area"].value, "20000")
         self.assertEqual(gui._roi_stat_vars["ROI1"]["mean"].value, "10.000000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["std"].value, "1.500000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["p90"].value, "12.000000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["threshold"].value, "11.500000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["highlight_ratio"].value, "0.125000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["hem_z_area"].value, "25")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean_delta"].value, "2.000000")
         self.assertEqual(gui._roi_stat_vars["ROI2"]["rect"].value, "-")
         self.assertEqual(gui._roi_stat_vars["ROI2"]["size"].value, "-")
 
