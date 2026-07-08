@@ -1647,12 +1647,35 @@ class HemRoi2BatchAnalyzerGui:
 
         buttons = ttk.Frame(main)
         buttons.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self._configure_source_folder_button_style()
+        self.tk.Button(
+            buttons,
+            text="选择文件夹",
+            command=self.select_source_folder,
+            bg="#22A652",
+            fg="white",
+            activebackground="#188A43",
+            activeforeground="white",
+            relief="raised",
+            padx=10,
+            pady=2,
+        ).pack(side="left")
         ttk.Button(buttons, text="加载/刷新序列", command=self.load_sequences).pack(side="left")
         self.analyze_button = ttk.Button(buttons, text="分析当前序列", command=self.run_analysis)
         self.analyze_button.pack(side="left", padx=(8, 0))
         self.next_button = ttk.Button(buttons, text="下一个序列", command=self.next_sequence)
         self.next_button.pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="导出当前序列Excel", command=self.export_current_sequence_excel).pack(side="left", padx=(8, 0))
+        self.sequence_selector = tk.StringVar(value="")
+        self.sequence_combo = ttk.Combobox(
+            buttons,
+            textvariable=self.sequence_selector,
+            values=[],
+            state="readonly",
+            width=28,
+        )
+        self.sequence_combo.pack(side="left", padx=(8, 0))
+        self.sequence_combo.bind("<<ComboboxSelected>>", self.on_sequence_selected)
         ttk.Checkbutton(buttons, text="显示ROI1", variable=self.show_roi1, command=self.refresh_preview).pack(side="left", padx=(20, 0))
         ttk.Checkbutton(buttons, text="显示ROI2", variable=self.show_roi2, command=self.refresh_preview).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(buttons, text="显示ROI3", variable=self.show_roi3, command=self.refresh_preview).pack(side="left", padx=(8, 0))
@@ -1681,6 +1704,25 @@ class HemRoi2BatchAnalyzerGui:
         ttk.Label(timeline, textvariable=self.frame_info).grid(row=0, column=2, sticky="e")
 
         ttk.Label(main, textvariable=self.status, wraplength=1200).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+    def _configure_source_folder_button_style(self) -> None:
+        style = self.ttk.Style()
+        style.configure("Green.TButton", foreground="white", background="#22A652")
+        style.map(
+            "Green.TButton",
+            foreground=[("disabled", "#E6E6E6"), ("active", "white")],
+            background=[("disabled", "#8FB99B"), ("active", "#188A43")],
+        )
+
+    def select_source_folder(self, ask_directory: Optional[Callable[..., str]] = None) -> None:
+        from tkinter import filedialog
+
+        chooser = ask_directory or filedialog.askdirectory
+        selected = chooser(title="选择序列根目录", initialdir=self.root_dir.get() or None)
+        if not selected:
+            return
+        self.root_dir.set(selected)
+        self.load_sequences()
 
     def _build_roi_stats_panel(self, parent) -> None:
         ttk = self.ttk
@@ -2283,6 +2325,7 @@ class HemRoi2BatchAnalyzerGui:
         self._analyzed_sequences = set()
         self._current_frame_paths = []
         self._current_frame_index = 0
+        self._sync_sequence_selector_values()
 
     def _current_sequence_dir(self) -> Optional[Path]:
         if not self._step_sequence_dirs:
@@ -2291,13 +2334,24 @@ class HemRoi2BatchAnalyzerGui:
             return None
         return self._step_sequence_dirs[self._current_sequence_index]
 
+    def _sync_sequence_selector_values(self) -> None:
+        if not hasattr(self, "sequence_selector"):
+            return
+        values = [sequence_dir.name for sequence_dir in self._step_sequence_dirs]
+        if hasattr(self, "sequence_combo"):
+            self.sequence_combo.configure(values=values)
+        sequence_dir = self._current_sequence_dir()
+        self.sequence_selector.set(sequence_dir.name if sequence_dir is not None else "")
+
     def _set_sequence_status(self) -> None:
         sequence_dir = self._current_sequence_dir()
         total = len(self._step_sequence_dirs)
         if sequence_dir is None:
             self.sequence_info.set("未加载序列")
+            self._sync_sequence_selector_values()
             return
         self.sequence_info.set(f"序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}")
+        self._sync_sequence_selector_values()
 
     def _load_current_frame_paths(self, config: AnalyzerConfig) -> None:
         sequence_dir = self._current_sequence_dir()
@@ -2312,6 +2366,36 @@ class HemRoi2BatchAnalyzerGui:
         self._current_frame_index = 0
         self.timeline.configure(from_=1, to=len(frame_paths))
         self.timeline.set(1)
+
+    def select_sequence_by_name(self, sequence_name: str, config: Optional[AnalyzerConfig] = None) -> None:
+        target = sequence_name.strip()
+        if not target:
+            return
+        for index, sequence_dir in enumerate(self._step_sequence_dirs):
+            if sequence_dir.name == target:
+                if config is None:
+                    config = config_from_gui_state(self.current_state())
+                self._current_sequence_index = index
+                self._step_next_index = index
+                self._load_current_frame_paths(config)
+                self._set_sequence_status()
+                self.refresh_preview()
+                return
+        raise ValueError(f"未找到序列：{target}")
+
+    def on_sequence_selected(self, _event=None) -> None:
+        from tkinter import messagebox
+
+        try:
+            config = config_from_gui_state(self.current_state())
+            if self._step_source_key != self._source_key_from_config(config):
+                self._reset_step_state(config)
+            elif self._config_key(config) != self._step_config_key:
+                self._step_config_key = self._config_key(config)
+            self.select_sequence_by_name(self.sequence_selector.get(), config)
+        except Exception as exc:
+            self.status.set(f"切换序列失败：{exc}")
+            messagebox.showerror("切换序列失败", str(exc))
 
     def _display_preview_image(self, image) -> None:
         from PIL import ImageTk
@@ -2474,8 +2558,13 @@ class HemRoi2BatchAnalyzerGui:
             self.status.set(f"切换序列失败：{exc}")
             messagebox.showerror("切换序列失败", str(exc))
 
-    def export_current_sequence_excel(self) -> None:
-        from tkinter import messagebox
+    def export_current_sequence_excel(
+        self,
+        ask_directory: Optional[Callable[..., str]] = None,
+        show_info: Optional[Callable[..., None]] = None,
+        show_error: Optional[Callable[..., None]] = None,
+    ) -> None:
+        from tkinter import filedialog, messagebox
 
         try:
             config = config_from_gui_state(self.current_state())
@@ -2484,15 +2573,22 @@ class HemRoi2BatchAnalyzerGui:
                 raise ValueError("未选择当前序列")
             if not self._current_frame_paths:
                 self._load_current_frame_paths(config)
+            chooser = ask_directory or filedialog.askdirectory
+            selected_dir = chooser(title="选择Excel导出目录", initialdir=str(config.excel_output_dir))
+            if not selected_dir:
+                return
+            output_dir = Path(selected_dir)
+            self.excel_output_dir.set(str(output_dir))
+            config = config_from_gui_state(self.current_state())
             focus_points = load_focus_points_csv(config.focus_points_csv)
-            output_path = Path(config.excel_output_dir) / f"{sequence_dir.name}.xlsx"
+            output_path = output_dir / f"{sequence_dir.name}.xlsx"
             saved_path = export_sequence_excel(sequence_dir, config, focus_points, output_path)
         except Exception as exc:
             self.status.set(f"导出Excel失败：{exc}")
-            messagebox.showerror("导出Excel失败", str(exc))
+            (show_error or messagebox.showerror)("导出Excel失败", str(exc))
             return
         self.status.set(f"当前序列Excel已导出：{saved_path}")
-        messagebox.showinfo("导出Excel完成", f"已导出：{saved_path}")
+        (show_info or messagebox.showinfo)("导出Excel完成", f"已导出：{saved_path}")
 
     def run_analysis(self) -> None:
         from tkinter import messagebox

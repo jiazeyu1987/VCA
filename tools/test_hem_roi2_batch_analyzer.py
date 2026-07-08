@@ -1397,6 +1397,181 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual([row["sequence"] for row in saved], ["seq_a", "seq_b"])
             self.assertEqual(gui._step_next_index, 2)
 
+    def test_gui_select_source_folder_sets_root_and_loads_sequences(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        selected = []
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.root_dir = FakeVar("old")
+        gui.load_sequences = lambda: selected.append(gui.root_dir.get())
+
+        gui.select_source_folder(lambda **_kwargs: "D:/data/sequences")
+
+        self.assertEqual(gui.root_dir.get(), "D:/data/sequences")
+        self.assertEqual(selected, ["D:/data/sequences"])
+
+    def test_gui_select_sequence_by_name_switches_exact_sequence(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeScale:
+            def configure(self, **_kwargs):
+                pass
+
+            def set(self, _value):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq_a = root / "seq_a"
+            seq_b = root / "seq_b"
+            seq_a.mkdir()
+            seq_b.mkdir()
+            write_frame(seq_a / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
+            write_frame(seq_b / "00001_2026-06-14_00-00-00.000_frame.png", 20, size=(400, 400))
+
+            gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+            gui.sequence_selector = FakeVar("")
+            gui.timeline = FakeScale()
+            gui.sequence_info = FakeVar("")
+            gui.frame_info = FakeVar("")
+            gui.status = FakeVar("")
+            gui._step_sequence_dirs = [seq_a, seq_b]
+            gui._current_sequence_index = 0
+            gui._current_frame_paths = []
+            gui._current_frame_index = 0
+            refreshed = []
+            gui.refresh_preview = lambda: refreshed.append(gui._current_sequence_dir().name)
+
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(100, 100)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                difference_threshold=5.0,
+                before_frame_index=1,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+            )
+
+            gui.select_sequence_by_name("seq_b", cfg)
+
+            self.assertEqual(gui._current_sequence_index, 1)
+            self.assertEqual(gui._step_next_index, 1)
+            self.assertEqual(gui._current_frame_paths[0].parent.name, "seq_b")
+            self.assertEqual(gui.sequence_selector.get(), "seq_b")
+            self.assertEqual(refreshed, ["seq_b"])
+
+    def test_gui_export_current_sequence_excel_uses_chosen_export_folder(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class FakeScale:
+            def configure(self, **_kwargs):
+                pass
+
+            def set(self, _value):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq_a"
+            export_dir = root / "exports"
+            seq.mkdir()
+            export_dir.mkdir()
+            write_frame(seq / "00001_2026-06-14_00-00-00.000_frame.png", 10, size=(400, 400))
+
+            gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+            gui.root_dir = FakeVar(str(root))
+            gui.output_csv = FakeVar(str(root / "summary.csv"))
+            gui.per_frame_csv = FakeVar("")
+            gui.settings_path = FakeVar("")
+            gui.focus_point = FakeVar("PointF(100, 100)")
+            gui.focus_x = FakeVar("100")
+            gui.focus_y = FakeVar("100")
+            gui.focus_points_csv = FakeVar("")
+            gui.provider_depth_mm = FakeVar("100")
+            gui.focus_y_offset_mm = FakeVar("0")
+            gui.roi2_left = FakeVar("2")
+            gui.roi2_right = FakeVar("2")
+            gui.roi2_top = FakeVar("3")
+            gui.roi2_bottom = FakeVar("3")
+            gui.roi3_left = FakeVar("30")
+            gui.roi3_right = FakeVar("30")
+            gui.roi3_top = FakeVar("50")
+            gui.roi3_bottom = FakeVar("100")
+            gui.roi4_x = FakeVar("")
+            gui.roi4_y = FakeVar("")
+            gui.roi4_width = FakeVar("")
+            gui.roi4_height = FakeVar("")
+            gui.roi4_bottom_region_ratio = FakeVar("")
+            gui.roi_rect_vars = {
+                roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+                for roi_name in analyzer.ROI_NAMES
+            }
+            gui.roi_shape_vars = {roi_name: FakeVar("rectangle") for roi_name in analyzer.ROI_NAMES}
+            gui.highlight_mode = FakeVar("fixed_gray")
+            gui.highlight_fixed_gray = FakeVar("93")
+            gui.highlight_baseline_multiplier = FakeVar("1.15")
+            gui.excel_output_dir = FakeVar(str(root / "old_exports"))
+            gui.difference_threshold = FakeVar("0.5")
+            gui.before_frame_index = FakeVar("1")
+            gui.after_strategy = FakeVar("last")
+            gui.include_selected_debug = FakeVar(False)
+            gui.max_sequences = FakeVar("")
+            gui.timeline = FakeScale()
+            gui.status = FakeVar("")
+            gui._step_sequence_dirs = [seq]
+            gui._current_sequence_index = 0
+            gui._current_frame_paths = []
+            gui._current_frame_index = 0
+
+            original_export = analyzer.export_sequence_excel
+            original_focus = analyzer.load_focus_points_csv
+            saved = []
+            analyzer.load_focus_points_csv = lambda _path: {}
+            analyzer.export_sequence_excel = lambda _seq, _cfg, _focus, output_path: saved.append(Path(output_path)) or Path(output_path)
+            try:
+                gui.export_current_sequence_excel(
+                    ask_directory=lambda **_kwargs: str(export_dir),
+                    show_info=lambda *_args, **_kwargs: None,
+                    show_error=lambda *_args, **_kwargs: None,
+                )
+            finally:
+                analyzer.export_sequence_excel = original_export
+                analyzer.load_focus_points_csv = original_focus
+
+            self.assertEqual(saved, [export_dir / "seq_a.xlsx"])
+            self.assertEqual(gui.excel_output_dir.get(), str(export_dir))
+
 
 if __name__ == "__main__":
     unittest.main()
