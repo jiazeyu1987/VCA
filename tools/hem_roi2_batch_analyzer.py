@@ -1666,7 +1666,7 @@ class HemRoi2BatchAnalyzerGui:
         self.next_button = ttk.Button(buttons, text="下一个序列", command=self.next_sequence)
         self.next_button.pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="导出当前序列Excel", command=self.export_current_sequence_excel).pack(side="left", padx=(8, 0))
-        self.sequence_selector = tk.StringVar(value="")
+        self.sequence_selector = self.tk.StringVar(value="")
         self.sequence_combo = ttk.Combobox(
             buttons,
             textvariable=self.sequence_selector,

@@ -1,4 +1,5 @@
 import csv
+import inspect
 import sys
 import tempfile
 import threading
@@ -1417,6 +1418,12 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
 
         self.assertEqual(gui.root_dir.get(), "D:/data/sequences")
         self.assertEqual(selected, ["D:/data/sequences"])
+
+    def test_gui_build_ui_uses_instance_tk_namespace_for_sequence_selector(self):
+        source = inspect.getsource(analyzer.HemRoi2BatchAnalyzerGui._build_ui)
+
+        self.assertIn("self.sequence_selector = self.tk.StringVar", source)
+        self.assertNotIn("self.sequence_selector = tk.StringVar", source)
 
     def test_gui_select_sequence_by_name_switches_exact_sequence(self):
         class FakeVar:
