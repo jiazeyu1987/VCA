@@ -29,6 +29,7 @@ PREVIEW_MAX_SIZE = (760, 460)
 PREVIEW_IMAGE_ANCHOR = "nw"
 ROI_STATS_PANEL_MIN_WIDTH = 840
 ROI_STATS_CARD_COLUMNS = 2
+ROI_STATS_VALUE_COLUMNS = 4
 ROI_STATS_FONT_SIZE = 8
 ROI_STATS_ROW_PADDING = 0
 ROI_NAMES = ("ROI1", "ROI2", "ROI3", "ROI4")
@@ -59,26 +60,45 @@ ROI_STAT_DISPLAY_FIELDS = [
     ("rect", "位置"),
     ("size", "尺寸"),
     ("area", "面积"),
-    ("mean", "平均灰度"),
-    ("density", "平均灰度密度"),
-    ("std", "灰度标准差"),
-    ("median", "灰度中位数"),
-    ("median_abs_deviation", "中位数绝对偏差"),
-    ("p10", "灰度P10"),
-    ("p90", "灰度P90"),
-    ("threshold", "高亮阈值"),
-    ("highlight_count", "高亮像素数"),
-    ("highlight_ratio", "高亮比例"),
-    ("highlight_std", "高亮像素标准差"),
-    ("hem_z_area", "HEM面积(z>=3)"),
-    ("mean_delta", "较基线均值差"),
-    ("mean_delta_pct", "较基线均值变化率"),
-    ("highlight_area_delta", "较基线高亮面积差"),
+    ("mean", "均灰"),
+    ("density", "灰密"),
+    ("std", "标准差"),
+    ("median", "中位"),
+    ("median_abs_deviation", "中偏差"),
+    ("p10", "P10"),
+    ("p90", "P90"),
+    ("threshold", "阈值"),
+    ("highlight_count", "高亮数"),
+    ("highlight_ratio", "高亮比"),
+    ("highlight_std", "高亮差"),
+    ("hem_z_area", "HEM面"),
+    ("mean_delta", "均差"),
+    ("mean_delta_pct", "均变率"),
+    ("highlight_area_delta", "亮面差"),
 ]
 
 
 def roi_stat_card_grid_position(index: int) -> tuple[int, int]:
     return index // ROI_STATS_CARD_COLUMNS, index % ROI_STATS_CARD_COLUMNS
+
+
+def roi_stat_value_grid_position(index: int) -> tuple[int, int]:
+    return index // ROI_STATS_VALUE_COLUMNS, index % ROI_STATS_VALUE_COLUMNS
+
+
+def _format_roi_stat_display_value(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    text = str(value)
+    if "," in text or "x" in text or "×" in text:
+        return text
+    try:
+        numeric = float(text)
+    except ValueError:
+        return text
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
 
 
 SUMMARY_FIELDS = [
@@ -1714,13 +1734,22 @@ class HemRoi2BatchAnalyzerGui:
             values = {field: self.tk.StringVar(value="-") for field, _label in ROI_STAT_DISPLAY_FIELDS}
             self._roi_stat_vars[roi_name] = values
             for field_index, (field, label) in enumerate(ROI_STAT_DISPLAY_FIELDS):
-                row_index = field_index + 3
-                ttk.Label(card, text=label, font=stat_font).grid(row=row_index, column=0, columnspan=3, sticky="w", pady=ROI_STATS_ROW_PADDING)
+                stat_row, stat_column = roi_stat_value_grid_position(field_index)
+                row_index = stat_row + 3
+                label_column = stat_column * 2
+                value_column = label_column + 1
+                ttk.Label(card, text=label, font=stat_font).grid(
+                    row=row_index,
+                    column=label_column,
+                    sticky="w",
+                    padx=(0, 2),
+                    pady=ROI_STATS_ROW_PADDING,
+                )
                 ttk.Label(card, textvariable=values[field], font=stat_font).grid(
                     row=row_index,
-                    column=3,
-                    columnspan=5,
+                    column=value_column,
                     sticky="e",
+                    padx=(0, 5),
                     pady=ROI_STATS_ROW_PADDING,
                 )
 
@@ -2309,9 +2338,9 @@ class HemRoi2BatchAnalyzerGui:
                 self._roi_histogram_labels[roi_name].configure(image=photo)
             for field, var in values.items():
                 if field == "size":
-                    var.set(size)
+                    var.set(_format_roi_stat_display_value(size))
                 else:
-                    var.set(stats.get(field) or "-")
+                    var.set(_format_roi_stat_display_value(stats.get(field)))
 
     def _preview_max_size(self) -> tuple[int, int]:
         try:

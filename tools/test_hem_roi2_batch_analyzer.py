@@ -758,13 +758,13 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(gui._roi_stat_vars["ROI1"]["rect"].value, "0,0,200,100")
         self.assertEqual(gui._roi_stat_vars["ROI1"]["size"].value, "200 × 100")
         self.assertEqual(gui._roi_stat_vars["ROI1"]["area"].value, "20000")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean"].value, "10.000000")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["std"].value, "1.500000")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["p90"].value, "12.000000")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["threshold"].value, "11.500000")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["highlight_ratio"].value, "0.125000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean"].value, "10")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["std"].value, "1.5")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["p90"].value, "12")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["threshold"].value, "11.5")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["highlight_ratio"].value, "0.125")
         self.assertEqual(gui._roi_stat_vars["ROI1"]["hem_z_area"].value, "25")
-        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean_delta"].value, "2.000000")
+        self.assertEqual(gui._roi_stat_vars["ROI1"]["mean_delta"].value, "2")
         self.assertEqual(gui._roi_stat_vars["ROI2"]["rect"].value, "-")
         self.assertEqual(gui._roi_stat_vars["ROI2"]["size"].value, "-")
 
@@ -775,6 +775,15 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(analyzer.PREVIEW_IMAGE_ANCHOR, "nw")
         self.assertGreaterEqual(analyzer.ROI_STATS_PANEL_MIN_WIDTH, 720)
         self.assertLessEqual(analyzer.ROI_STATS_FONT_SIZE, 8)
+        self.assertEqual(analyzer.ROI_STATS_VALUE_COLUMNS, 4)
+        self.assertTrue(all(len(label) <= 4 for _field, label in analyzer.ROI_STAT_DISPLAY_FIELDS))
+
+    def test_gui_stat_display_value_uses_at_most_three_decimals(self):
+        self.assertEqual(analyzer._format_roi_stat_display_value("15.588854"), "15.589")
+        self.assertEqual(analyzer._format_roi_stat_display_value("10.000000"), "10")
+        self.assertEqual(analyzer._format_roi_stat_display_value("0.125000"), "0.125")
+        self.assertEqual(analyzer._format_roi_stat_display_value("0.123400"), "0.123")
+        self.assertEqual(analyzer._format_roi_stat_display_value("0,0,600,512"), "0,0,600,512")
 
     def test_roi_rect_overrides_replace_algorithm_rects_for_preview(self):
         frame = np.zeros((100, 120, 3), dtype=np.uint8)
