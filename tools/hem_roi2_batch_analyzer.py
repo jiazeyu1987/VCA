@@ -46,6 +46,7 @@ HIGHLIGHT_MODE_LABELS = {"固定灰度值": "fixed_gray", "基线倍数": "basel
 HIGHLIGHT_MODE_DISPLAY = {value: label for label, value in HIGHLIGHT_MODE_LABELS.items()}
 DEFAULT_FIXED_GRAY_THRESHOLD = 93.0
 DEFAULT_EXCEL_OUTPUT_DIR = Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "excel"
+DEFAULT_SETTINGS_FILENAME = "settings"
 ROI1_COLOR = api_server.ROI1_MARKER_COLOR
 ROI2_COLOR = api_server.ROI2_MARKER_COLOR
 ROI3_COLOR = api_server.ROI3_MARKER_COLOR
@@ -217,6 +218,12 @@ def _parse_focus_point_value(value: Any) -> Optional[tuple[int, int]]:
             raise ValueError(f"focus_point list must contain exactly two values, got {value!r}")
         return int(value[0]), int(value[1])
     return api_server.parse_focus_point(value)
+
+
+def _default_settings_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / DEFAULT_SETTINGS_FILENAME
+    return Path(__file__).resolve().parents[1] / DEFAULT_SETTINGS_FILENAME
 
 
 def _load_settings(path: Optional[Path]) -> dict:
@@ -666,6 +673,8 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     if not focus_point_text and focus_points_csv is None:
         raise ValueError("必须填写全局焦点或选择焦点CSV")
     settings_path = _optional_path(state.settings_path)
+    if settings_path is not None and not settings_path.is_absolute() and settings_path == Path(DEFAULT_SETTINGS_FILENAME):
+        settings_path = _default_settings_path()
     settings = _load_settings(settings_path) if settings_path is not None else {}
     roi2_params = _roi_params_from_state(
         state.roi2_left,
@@ -1539,15 +1548,16 @@ class HemRoi2BatchAnalyzerGui:
         self.root_dir = tk.StringVar(value="E:\\20260614")
         self.output_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "summary.csv"))
         self.per_frame_csv = tk.StringVar(value=str(Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "frames.csv"))
-        self.settings_path = tk.StringVar(value="settings")
+        default_settings_path = _default_settings_path()
+        self.settings_path = tk.StringVar(value=str(default_settings_path))
         self.focus_point = tk.StringVar(value=DEFAULT_FOCUS_POINT)
         focus_x, focus_y = _parse_focus_point_value(DEFAULT_FOCUS_POINT)
         self.focus_x = tk.StringVar(value=str(focus_x))
         self.focus_y = tk.StringVar(value=str(focus_y))
         self.focus_points_csv = tk.StringVar(value="")
         self.provider_depth_mm = tk.StringVar(value="")
-        self.focus_y_offset_mm = tk.StringVar(value=str(_settings_focus_y_offset(_load_settings(Path("settings"))) if Path("settings").exists() else 0.0))
-        settings = _load_settings(Path("settings")) if Path("settings").exists() else {}
+        settings = _load_settings(default_settings_path) if default_settings_path.exists() else {}
+        self.focus_y_offset_mm = tk.StringVar(value=str(_settings_focus_y_offset(settings)))
         roi2 = _settings_roi2_params(settings)
         roi3 = _settings_roi3_params(settings)
         roi4_rect = _settings_roi4_rect(settings)

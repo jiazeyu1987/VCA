@@ -109,6 +109,13 @@ if (-not (Test-Path $exePath)) {
 }
 
 $exeInfo = Get-Item -LiteralPath $exePath
+$sidecarSettingsPath = Join-Path $distRoot "settings"
+Copy-Item -LiteralPath $settingsPath -Destination $sidecarSettingsPath -Force
+if (-not (Test-Path $sidecarSettingsPath)) {
+    throw "Settings sidecar file was not copied next to exe: $sidecarSettingsPath"
+}
 Write-Host "[OK] HEM ROI2 batch analyzer exe created:"
 Write-Host "     $exePath"
+Write-Host "[OK] Settings sidecar copied:"
+Write-Host "     $sidecarSettingsPath"
 Write-Host ("[OK] Size: {0:N2} MB" -f ($exeInfo.Length / 1MB))

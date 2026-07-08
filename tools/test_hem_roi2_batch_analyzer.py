@@ -859,6 +859,34 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(analyzer._settings_highlight_rule(settings), highlight_rule)
             self.assertEqual(analyzer._settings_excel_output_dir(settings), Path("exports"))
 
+    def test_default_settings_path_points_to_project_root_when_not_packaged(self):
+        self.assertEqual(analyzer._default_settings_path(), Path(__file__).resolve().parents[1] / "settings")
+
+    def test_gui_state_resolves_default_relative_settings_to_project_settings(self):
+        state = analyzer.GuiState(
+            root_dir=".",
+            output_csv="summary.csv",
+            per_frame_csv="",
+            settings_path="settings",
+            focus_point=analyzer.DEFAULT_FOCUS_POINT,
+            focus_points_csv="",
+            provider_depth_mm="",
+            focus_y_offset_mm="0",
+            roi2_left="",
+            roi2_right="",
+            roi2_top="",
+            roi2_bottom="",
+            difference_threshold="0.5",
+            before_frame_index="1",
+            after_strategy="roi2_peak",
+            include_selected_debug=False,
+            max_sequences="",
+        )
+
+        cfg = analyzer.config_from_gui_state(state)
+
+        self.assertEqual(cfg.settings_path, analyzer._default_settings_path())
+
     def test_roi_definitions_from_preview_lock_visible_rects_when_inputs_blank(self):
         inputs = {
             roi_name: {field_name: "" for field_name in analyzer.ROI_RECT_FIELDS}
