@@ -775,7 +775,7 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(analyzer.PREVIEW_IMAGE_ANCHOR, "nw")
         self.assertGreaterEqual(analyzer.ROI_STATS_PANEL_MIN_WIDTH, 720)
         self.assertLessEqual(analyzer.ROI_STATS_FONT_SIZE, 8)
-        self.assertEqual(analyzer.ROI_STATS_VALUE_COLUMNS, 4)
+        self.assertEqual(analyzer.ROI_STATS_VALUE_COLUMNS, 2)
         self.assertTrue(all(len(label) <= 4 for _field, label in analyzer.ROI_STAT_DISPLAY_FIELDS))
 
     def test_gui_stat_display_value_uses_at_most_three_decimals(self):
