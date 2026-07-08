@@ -904,6 +904,131 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual(gui.roi_shape_vars["ROI3"].get(), "矩形")
 
+    def test_gui_syncs_current_preview_roi_rects_to_inputs(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.roi_rect_vars = {
+            roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        gui.roi_shape_vars = {
+            roi_name: FakeVar("妞渾" if roi_name == "ROI2" else "鐭╁舰")
+            for roi_name in analyzer.ROI_NAMES
+        }
+        meta = {
+            "roi1_rect": (0, 0, 600, 512),
+            "roi2_rect": (259, 235, 339, 315),
+            "roi3_rect": (269, 235, 329, 385),
+            "roi4_rect": (0, 358, 600, 512),
+        }
+
+        gui._sync_current_preview_roi_rect_inputs(meta)
+
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI1"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "0", "y": "0", "width": "600", "height": "512"},
+        )
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI2"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "259", "y": "235", "width": "80", "height": "80"},
+        )
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI3"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "269", "y": "235", "width": "60", "height": "150"},
+        )
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI4"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "0", "y": "358", "width": "600", "height": "154"},
+        )
+        self.assertEqual(gui.roi_shape_vars["ROI2"].get(), "妞渾")
+        self.assertFalse(gui._syncing_roi_rect_inputs)
+
+    def test_gui_roi_shape_toggle_keeps_existing_rect_parameters(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.roi_rect_vars = {
+            roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        gui.roi_shape_vars = {roi_name: FakeVar("鐭╁舰") for roi_name in analyzer.ROI_NAMES}
+        gui._current_preview_meta = {"roi2_rect": (10, 20, 40, 60)}
+        gui.roi_rect_vars["ROI2"]["x"].set("10")
+        gui.roi_rect_vars["ROI2"]["y"].set("20")
+        gui.roi_rect_vars["ROI2"]["width"].set("30")
+        gui.roi_rect_vars["ROI2"]["height"].set("40")
+        calls = []
+        gui._schedule_preview_refresh = lambda *_args: calls.append("refresh")
+
+        gui.roi_shape_vars["ROI2"].set("妞渾")
+        gui._on_roi_shape_changed("ROI2")
+        gui.roi_shape_vars["ROI2"].set("鐭╁舰")
+        gui._on_roi_shape_changed("ROI2")
+
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI2"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "10", "y": "20", "width": "30", "height": "40"},
+        )
+        self.assertEqual(calls, ["refresh", "refresh"])
+
+    def test_gui_roi_shape_toggle_fills_blank_inputs_from_preview_rect(self):
+        class FakeVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui.roi_rect_vars = {
+            roi_name: {field_name: FakeVar("") for field_name in analyzer.ROI_RECT_FIELDS}
+            for roi_name in analyzer.ROI_NAMES
+        }
+        gui.roi_shape_vars = {roi_name: FakeVar("鐭╁舰") for roi_name in analyzer.ROI_NAMES}
+        gui._current_preview_meta = {"roi3_rect": (25, 70, 75, 120)}
+        calls = []
+        gui._schedule_preview_refresh = lambda *_args: calls.append("refresh")
+
+        gui.roi_shape_vars["ROI3"].set("妞渾")
+        gui._on_roi_shape_changed("ROI3")
+
+        self.assertEqual(
+            {field: gui.roi_rect_vars["ROI3"][field].get() for field in analyzer.ROI_RECT_FIELDS},
+            {"x": "25", "y": "70", "width": "50", "height": "50"},
+        )
+        self.assertEqual(calls, ["refresh"])
+
+    def test_gui_schedule_preview_refresh_ignores_internal_roi_input_sync(self):
+        calls = []
+        gui = object.__new__(analyzer.HemRoi2BatchAnalyzerGui)
+        gui._syncing_roi_rect_inputs = True
+        gui._sync_focus_point_from_xy = lambda: calls.append("sync-focus")
+        gui._current_frame_paths = [Path("frame.png")]
+
+        gui._schedule_preview_refresh()
+
+        self.assertEqual(calls, [])
+
     def test_saved_preview_roi_centers_do_not_move_after_focus_changes(self):
         frame = np.zeros((100, 120, 3), dtype=np.uint8)
         base_cfg = analyzer.AnalyzerConfig(

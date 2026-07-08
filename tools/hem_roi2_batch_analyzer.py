@@ -1605,6 +1605,7 @@ class HemRoi2BatchAnalyzerGui:
         self._settings_window = None
         self._preview_refresh_after_id = None
         self._preview_resize_after_id = None
+        self._syncing_roi_rect_inputs = False
         self._last_preview_area_size = (0, 0)
         self._build_ui()
         self._install_setting_traces()
@@ -1954,7 +1955,6 @@ class HemRoi2BatchAnalyzerGui:
         for roi_name in ROI_NAMES:
             for field_name in ROI_RECT_FIELDS:
                 live_preview_vars.append(self.roi_rect_vars[roi_name][field_name])
-            live_preview_vars.append(self.roi_shape_vars[roi_name])
         live_preview_vars.extend(
             [
                 self.highlight_mode,
@@ -1979,12 +1979,19 @@ class HemRoi2BatchAnalyzerGui:
 
         for var in live_preview_vars:
             var.trace_add("write", self._schedule_preview_refresh)
+        for roi_name in ROI_NAMES:
+            self.roi_shape_vars[roi_name].trace_add(
+                "write",
+                lambda *_args, roi_name=roi_name: self._on_roi_shape_changed(roi_name),
+            )
         for var in source_vars:
             var.trace_add("write", self._mark_sequences_need_reload)
         for var in analysis_vars:
             var.trace_add("write", self._mark_analysis_settings_changed)
 
     def _schedule_preview_refresh(self, *_args) -> None:
+        if getattr(self, "_syncing_roi_rect_inputs", False):
+            return
         self._sync_focus_point_from_xy()
         if not self._current_frame_paths:
             return
@@ -2045,6 +2052,37 @@ class HemRoi2BatchAnalyzerGui:
             roi_name: ROI_SHAPE_LABELS.get(self.roi_shape_vars[roi_name].get(), self.roi_shape_vars[roi_name].get())
             for roi_name in ROI_NAMES
         }
+
+    def _sync_current_preview_roi_rect_inputs(self, meta: dict[str, Any]) -> None:
+        self._syncing_roi_rect_inputs = True
+        try:
+            for roi_name in ROI_NAMES:
+                rect = meta.get(f"{roi_name.lower()}_rect")
+                if rect is None:
+                    continue
+                values = _rect_to_input_values(tuple(int(v) for v in rect))
+                for field_name in ROI_RECT_FIELDS:
+                    self.roi_rect_vars[roi_name][field_name].set(values[field_name])
+        finally:
+            self._syncing_roi_rect_inputs = False
+
+    def _fill_roi_rect_input_from_preview_if_blank(self, roi_name: str) -> None:
+        values = self.roi_rect_vars[roi_name]
+        fields = [str(values[field_name].get()).strip() for field_name in ROI_RECT_FIELDS]
+        if not all(not field for field in fields):
+            return
+        rect = getattr(self, "_current_preview_meta", {}).get(f"{roi_name.lower()}_rect")
+        if rect is None:
+            return
+        input_values = _rect_to_input_values(tuple(int(v) for v in rect))
+        for field_name in ROI_RECT_FIELDS:
+            values[field_name].set(input_values[field_name])
+
+    def _on_roi_shape_changed(self, roi_name: str) -> None:
+        if roi_name not in ROI_NAMES:
+            raise ValueError(f"unknown ROI name: {roi_name}")
+        self._fill_roi_rect_input_from_preview_if_blank(roi_name)
+        self._schedule_preview_refresh()
 
     def _apply_roi_definitions_to_vars(self, definitions: dict[str, dict[str, Any]]) -> None:
         for roi_name in ROI_NAMES:
@@ -2336,6 +2374,7 @@ class HemRoi2BatchAnalyzerGui:
                 baseline_frame_path=baseline_frame_path,
             )
             self._current_preview_meta = meta
+            self._sync_current_preview_roi_rect_inputs(meta)
             self._display_preview_image(image)
             self._update_roi_stats_panel(meta)
             self._set_sequence_status()
