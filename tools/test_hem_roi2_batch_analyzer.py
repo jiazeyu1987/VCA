@@ -185,6 +185,70 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(saved[0]["roi2_color"], "green")
             self.assertTrue(cfg.per_frame_csv.exists())
 
+    def test_analyze_root_writes_diagnostic_log_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            for index, value in enumerate((10, 10, 11, 14, 14, 14), start=1):
+                write_frame(seq / f"{index:05d}_2026-06-14_00-00-00.000_frame.png", value, size=(20, 20))
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=root / "frames.csv",
+                settings_path=None,
+                focus_point=[10, 10],
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 2, "right": 2, "top": 3, "bottom": 3},
+                difference_threshold=5.0,
+                before_frame_index=2,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+                clinical_before_offsets=(-1, 0),
+                clinical_after_offsets=(-1, 0),
+                log_file=root / "analysis.log",
+                log_level="DEBUG",
+            )
+
+            analyzer.analyze_root(cfg)
+
+            log_text = cfg.log_file.read_text(encoding="utf-8")
+            self.assertIn("analysis_start", log_text)
+            self.assertIn("sequence_start sequence=seq", log_text)
+            self.assertIn("roi2_resolved sequence=seq", log_text)
+            self.assertIn("clinical_window sequence=seq", log_text)
+            self.assertIn("clinical_judgement sequence=seq", log_text)
+            self.assertIn("csv_written path=", log_text)
+            self.assertNotIn("[[[", log_text)
+
+    def test_cli_config_accepts_diagnostic_log_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_file = root / "hem.log"
+
+            cfg = analyzer.build_config_from_args(
+                [
+                    "--root",
+                    str(root),
+                    "--output-csv",
+                    str(root / "summary.csv"),
+                    "--settings",
+                    "",
+                    "--focus-point",
+                    "PointF(10, 10)",
+                    "--log-file",
+                    str(log_file),
+                    "--log-level",
+                    "DEBUG",
+                ]
+            )
+
+            self.assertEqual(cfg.log_file, log_file)
+            self.assertEqual(cfg.log_level, "DEBUG")
+
     def test_missing_focus_point_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

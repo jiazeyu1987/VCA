@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import logging
 import re
 import sys
 import threading
@@ -59,6 +60,12 @@ HEM_Z_SCORE_THRESHOLD = 3.0
 DEFAULT_CLINICAL_ROI = "ROI2"
 DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD = 1.5
 DEFAULT_CLINICAL_STRENGTH_THRESHOLD = 3.0
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_GUI_LOG_FILE = Path("doc") / "tasks" / "hem-roi2-batch-analyzer" / "hem_roi2_batch_analyzer.log"
+LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+LOGGER = logging.getLogger("hem_roi2_batch_analyzer")
+_ACTIVE_LOG_SIGNATURE: Optional[tuple[Path, str]] = None
 
 ROI_STAT_DISPLAY_FIELDS = [
     ("rect", "位置"),
@@ -182,6 +189,8 @@ class AnalyzerConfig:
     clinical_after_offsets: Optional[tuple[int, ...]] = None
     clinical_effective_threshold: float = DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD
     clinical_strength_threshold: float = DEFAULT_CLINICAL_STRENGTH_THRESHOLD
+    log_file: Optional[Path] = None
+    log_level: str = DEFAULT_LOG_LEVEL
 
 
 @dataclass(frozen=True)
@@ -223,6 +232,8 @@ class GuiState:
     clinical_after_offsets: str = ""
     clinical_effective_threshold: str = str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD)
     clinical_strength_threshold: str = str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD)
+    log_file: str = ""
+    log_level: str = DEFAULT_LOG_LEVEL
 
 
 def _fmt_float(value: Optional[float]) -> str:
@@ -241,6 +252,51 @@ def _fmt_rect(value: Optional[tuple[int, int, int, int]]) -> str:
     if value is None:
         return ""
     return ",".join(str(int(v)) for v in value)
+
+
+def _normalize_log_level(value: Any) -> str:
+    level = str(value or DEFAULT_LOG_LEVEL).strip().upper()
+    if level not in LOG_LEVELS:
+        raise ValueError(f"log_level must be one of: {', '.join(sorted(LOG_LEVELS))}")
+    return level
+
+
+def configure_diagnostic_logging(log_file: Optional[Path], log_level: str = DEFAULT_LOG_LEVEL) -> None:
+    global _ACTIVE_LOG_SIGNATURE
+    close_diagnostic_logging()
+    if log_file is None:
+        return
+    level = _normalize_log_level(log_level)
+    resolved = Path(log_file)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(resolved, encoding="utf-8")
+    handler._hem_roi2_diagnostic_handler = True
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(getattr(logging, level))
+    LOGGER.propagate = False
+    _ACTIVE_LOG_SIGNATURE = (resolved, level)
+    LOGGER.info("logging_configured log_file=%s log_level=%s", resolved, level)
+
+
+def close_diagnostic_logging() -> None:
+    global _ACTIVE_LOG_SIGNATURE
+    for handler in list(LOGGER.handlers):
+        if getattr(handler, "_hem_roi2_diagnostic_handler", False):
+            LOGGER.info("logging_closed log_file=%s", getattr(handler, "baseFilename", ""))
+            handler.flush()
+            LOGGER.removeHandler(handler)
+            handler.close()
+    _ACTIVE_LOG_SIGNATURE = None
+
+
+def _ensure_diagnostic_logging(config: "AnalyzerConfig") -> None:
+    target = config.log_file
+    level = _normalize_log_level(config.log_level)
+    signature = (Path(target), level) if target is not None else None
+    if signature == _ACTIVE_LOG_SIGNATURE:
+        return
+    configure_diagnostic_logging(target, level)
 
 
 def _parse_focus_point_value(value: Any) -> Optional[tuple[int, int]]:
@@ -821,6 +877,8 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         clinical_after_offsets=clinical_after_offsets,
         clinical_effective_threshold=clinical_effective_threshold,
         clinical_strength_threshold=clinical_strength_threshold,
+        log_file=_optional_path(state.log_file),
+        log_level=_normalize_log_level(state.log_level),
     )
 
 
@@ -1488,11 +1546,29 @@ def calculate_clinical_hem_metrics(
     roi_name, shape, rect = _resolve_clinical_roi(first_frame, focus_anchor, config)
     before_indices = _clinical_window_indices(len(frame_paths), before_index, before_offsets, "before", sequence_name)
     after_indices = _clinical_window_indices(len(frame_paths), after_index, after_offsets, "after", sequence_name)
+    LOGGER.info(
+        "clinical_window sequence=%s roi=%s shape=%s rect=%s before_indices=%s after_indices=%s",
+        sequence_name,
+        roi_name,
+        shape,
+        _fmt_rect(rect),
+        ",".join(str(index + 1) for index in before_indices),
+        ",".join(str(index + 1) for index in after_indices),
+    )
     before_mean, before_median = _clinical_window_summary(frame_paths, before_indices, rect, shape)
     after_mean, after_median = _clinical_window_summary(frame_paths, after_indices, rect, shape)
     delta_mean = after_mean - before_mean
     delta_median = after_median - before_median
     judgement = classify_clinical_hem_delta(delta_mean, delta_median, effective_threshold, strength_threshold)
+    LOGGER.info(
+        "clinical_judgement sequence=%s delta_mean=%.6f delta_median=%.6f effective=%s strength=%s recommendation=%s",
+        sequence_name,
+        delta_mean,
+        delta_median,
+        judgement["clinical_effective"],
+        judgement["clinical_strength"],
+        judgement["clinical_recommendation"],
+    )
     summary = {
         "clinical_roi": roi_name,
         "clinical_roi_shape": shape,
@@ -1528,7 +1604,15 @@ def analyze_sequence(
     config: AnalyzerConfig,
     focus_points: dict[str, Any],
 ) -> tuple[dict[str, str], list[dict[str, str]]]:
+    _ensure_diagnostic_logging(config)
     frame_paths = list_frame_paths(sequence_dir, config.include_selected_debug)
+    LOGGER.info(
+        "sequence_start sequence=%s frame_count=%s before_frame_index=%s after_strategy=%s",
+        sequence_dir.name,
+        len(frame_paths),
+        config.before_frame_index,
+        config.after_strategy,
+    )
     if not frame_paths:
         raise ValueError(f"sequence has no PNG frames: {sequence_dir}")
     before_index = int(config.before_frame_index) - 1
@@ -1540,6 +1624,15 @@ def analyze_sequence(
     focus_anchor = resolve_sequence_focus(sequence_dir.name, config, focus_points)
     first_frame = load_frame(frame_paths[before_index])
     offset_anchor, roi2_rect = resolve_roi2_rect(first_frame, focus_anchor, config)
+    roi2_shape = _normalize_roi_shape((config.roi_definitions.get("ROI2") or {}).get("shape", "rectangle"), "ROI2")
+    LOGGER.debug(
+        "roi2_resolved sequence=%s focus_anchor=%s offset_anchor=%s roi2_rect=%s roi2_shape=%s",
+        sequence_dir.name,
+        _fmt_point(focus_anchor),
+        _fmt_point(offset_anchor),
+        _fmt_rect(roi2_rect),
+        roi2_shape,
+    )
 
     frame_means = [frame_roi2_mean(path, roi2_rect) for path in frame_paths]
     before_mean = frame_means[before_index]
@@ -1583,6 +1676,16 @@ def analyze_sequence(
             config,
         )
         row.update(clinical_summary)
+    LOGGER.info(
+        "sequence_result sequence=%s before_frame=%s after_frame=%s before_mean=%.6f after_mean=%.6f roi2_diff=%.6f roi2_color=%s",
+        sequence_dir.name,
+        frame_paths[before_index].name,
+        frame_paths[after_index].name,
+        float(before_mean),
+        float(after_mean),
+        roi2_diff,
+        roi2_color,
+    )
     frame_rows = []
     for index, path in enumerate(frame_paths):
         frame_rows.append(
@@ -1604,27 +1707,53 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    LOGGER.info("csv_written path=%s rows=%s fields=%s", path, len(rows), len(fields))
 
 
 def analyze_root(
     config: AnalyzerConfig,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> list[dict[str, str]]:
-    focus_points = load_focus_points_csv(config.focus_points_csv)
-    summary_rows: list[dict[str, str]] = []
-    frame_rows: list[dict[str, str]] = []
-    sequence_dirs = list_sequences(config.root_dir, config.max_sequences)
-    total = len(sequence_dirs)
-    for index, sequence_dir in enumerate(sequence_dirs, start=1):
-        if progress_callback is not None:
-            progress_callback(index, total, sequence_dir.name)
-        row, sequence_frame_rows = analyze_sequence(sequence_dir, config, focus_points)
-        summary_rows.append(row)
-        frame_rows.extend(sequence_frame_rows)
-    write_csv(config.output_csv, SUMMARY_FIELDS, summary_rows)
-    if config.per_frame_csv is not None:
-        write_csv(config.per_frame_csv, FRAME_FIELDS, frame_rows)
-    return summary_rows
+    _ensure_diagnostic_logging(config)
+    try:
+        LOGGER.info(
+            "analysis_start root=%s output_csv=%s per_frame_csv=%s max_sequences=%s",
+            config.root_dir,
+            config.output_csv,
+            config.per_frame_csv,
+            config.max_sequences,
+        )
+        focus_points = load_focus_points_csv(config.focus_points_csv)
+        summary_rows: list[dict[str, str]] = []
+        frame_rows: list[dict[str, str]] = []
+        sequence_dirs = list_sequences(config.root_dir, config.max_sequences)
+        total = len(sequence_dirs)
+        LOGGER.info("analysis_sequences_discovered root=%s total=%s", config.root_dir, total)
+        for index, sequence_dir in enumerate(sequence_dirs, start=1):
+            if progress_callback is not None:
+                progress_callback(index, total, sequence_dir.name)
+            try:
+                row, sequence_frame_rows = analyze_sequence(sequence_dir, config, focus_points)
+            except Exception:
+                LOGGER.exception("sequence_failed sequence=%s index=%s total=%s", sequence_dir.name, index, total)
+                raise
+            summary_rows.append(row)
+            frame_rows.extend(sequence_frame_rows)
+        write_csv(config.output_csv, SUMMARY_FIELDS, summary_rows)
+        if config.per_frame_csv is not None:
+            write_csv(config.per_frame_csv, FRAME_FIELDS, frame_rows)
+        LOGGER.info(
+            "analysis_complete root=%s sequences=%s frame_rows=%s",
+            config.root_dir,
+            len(summary_rows),
+            len(frame_rows),
+        )
+        return summary_rows
+    except Exception:
+        LOGGER.exception("analysis_failed root=%s output_csv=%s", config.root_dir, config.output_csv)
+        raise
+    finally:
+        close_diagnostic_logging()
 
 
 def _excel_stats_headers() -> list[str]:
@@ -1683,91 +1812,100 @@ def export_sequence_excel(
 ) -> Path:
     from openpyxl import Workbook
 
-    frame_paths = list_frame_paths(sequence_dir, config.include_selected_debug)
-    if not frame_paths:
-        raise ValueError(f"sequence has no PNG frames: {sequence_dir}")
-    before_index = int(config.before_frame_index) - 1
-    if before_index < 0 or before_index >= len(frame_paths):
-        raise ValueError(
-            f"before_frame_index out of range for sequence {sequence_dir.name}: "
-            f"{config.before_frame_index} not in 1..{len(frame_paths)}"
-        )
-
-    focus_anchor = resolve_sequence_focus(sequence_dir.name, config, focus_points)
-    baseline_frame = load_frame(frame_paths[before_index])
-    roi_meta = resolve_roi_rects(baseline_frame, focus_anchor, config, include_roi3=True, include_roi4=True)
-    baseline_stats = roi_stats_for_frame_set(baseline_frame, roi_meta)
-    summary_row, _frame_rows = analyze_sequence(sequence_dir, config, focus_points)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    workbook = Workbook(write_only=False)
-    summary_sheet = workbook.active
-    summary_sheet.title = "Summary"
-    summary_sheet.append(["字段", "值"])
-    summary_sheet.append(["sequence", sequence_dir.name])
-    summary_sheet.append(["frame_count", len(frame_paths)])
-    summary_sheet.append(["before_frame_index", config.before_frame_index])
-    summary_sheet.append(["before_frame", frame_paths[before_index].name])
-    summary_sheet.append(["highlight_mode", _normalize_highlight_rule(config.highlight_rule)["mode"]])
-    summary_sheet.append(["fixed_gray", _normalize_highlight_rule(config.highlight_rule)["fixed_gray"]])
-    summary_sheet.append(["baseline_multiplier", _normalize_highlight_rule(config.highlight_rule)["baseline_multiplier"]])
-    summary_sheet.append(["roi2_color", summary_row["roi2_color"]])
-    summary_sheet.append(["roi2_diff", summary_row["roi2_diff"]])
-    for field in SUMMARY_FIELDS:
-        if field.startswith("clinical_"):
-            summary_sheet.append([field, _excel_cell_value(summary_row.get(field, ""))])
-    summary_sheet.append(["summary_csv", str(config.output_csv)])
-
-    stats_sheet = workbook.create_sheet("Frame_ROI_Stats")
-    stats_headers = _excel_stats_headers()
-    stats_sheet.append(stats_headers)
-
-    histogram_sheet = workbook.create_sheet("Histograms")
-    histogram_headers = ["sequence", "frame_index", "frame", "roi"] + [f"gray_{index}" for index in range(256)]
-    histogram_sheet.append(histogram_headers)
-
-    config_sheet = workbook.create_sheet("ROI_Config")
-    config_sheet.append(["roi", "shape", "x", "y", "width", "height", "highlight_mode", "fixed_gray", "baseline_multiplier"])
-    highlight_rule = _normalize_highlight_rule(config.highlight_rule)
-    for roi_name in ROI_NAMES:
-        rect = roi_meta.get(f"{roi_name.lower()}_rect")
-        if rect is None:
-            continue
-        x1, y1, x2, y2 = [int(v) for v in rect]
-        config_sheet.append(
-            [
-                roi_name,
-                roi_meta["roi_shapes"].get(roi_name, "rectangle"),
-                x1,
-                y1,
-                x2 - x1,
-                y2 - y1,
-                highlight_rule["mode"],
-                highlight_rule["fixed_gray"],
-                highlight_rule["baseline_multiplier"],
-            ]
-        )
-
-    for frame_index, frame_path in enumerate(frame_paths, start=1):
-        frame = load_frame(frame_path)
-        stats_by_roi = roi_stats_for_frame_set(frame, roi_meta, baseline_stats)
-        for roi_name in ROI_NAMES:
-            stats = stats_by_roi[roi_name]
-            stats_row = {
-                "sequence": sequence_dir.name,
-                "frame_index": frame_index,
-                "frame": frame_path.name,
-                "roi": roi_name,
-                **stats,
-            }
-            stats_sheet.append([_excel_cell_value(stats_row.get(header, "")) for header in stats_headers])
-            histogram_sheet.append(
-                [sequence_dir.name, frame_index, frame_path.name, roi_name]
-                + [int(value) for value in stats.get("histogram", [0] * 256)]
+    _ensure_diagnostic_logging(config)
+    try:
+        LOGGER.info("excel_export_start sequence=%s output_path=%s", sequence_dir.name, output_path)
+        frame_paths = list_frame_paths(sequence_dir, config.include_selected_debug)
+        if not frame_paths:
+            raise ValueError(f"sequence has no PNG frames: {sequence_dir}")
+        before_index = int(config.before_frame_index) - 1
+        if before_index < 0 or before_index >= len(frame_paths):
+            raise ValueError(
+                f"before_frame_index out of range for sequence {sequence_dir.name}: "
+                f"{config.before_frame_index} not in 1..{len(frame_paths)}"
             )
 
-    workbook.save(output_path)
-    return output_path
+        focus_anchor = resolve_sequence_focus(sequence_dir.name, config, focus_points)
+        baseline_frame = load_frame(frame_paths[before_index])
+        roi_meta = resolve_roi_rects(baseline_frame, focus_anchor, config, include_roi3=True, include_roi4=True)
+        baseline_stats = roi_stats_for_frame_set(baseline_frame, roi_meta)
+        summary_row, _frame_rows = analyze_sequence(sequence_dir, config, focus_points)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        workbook = Workbook(write_only=False)
+        summary_sheet = workbook.active
+        summary_sheet.title = "Summary"
+        summary_sheet.append(["字段", "值"])
+        summary_sheet.append(["sequence", sequence_dir.name])
+        summary_sheet.append(["frame_count", len(frame_paths)])
+        summary_sheet.append(["before_frame_index", config.before_frame_index])
+        summary_sheet.append(["before_frame", frame_paths[before_index].name])
+        summary_sheet.append(["highlight_mode", _normalize_highlight_rule(config.highlight_rule)["mode"]])
+        summary_sheet.append(["fixed_gray", _normalize_highlight_rule(config.highlight_rule)["fixed_gray"]])
+        summary_sheet.append(["baseline_multiplier", _normalize_highlight_rule(config.highlight_rule)["baseline_multiplier"]])
+        summary_sheet.append(["roi2_color", summary_row["roi2_color"]])
+        summary_sheet.append(["roi2_diff", summary_row["roi2_diff"]])
+        for field in SUMMARY_FIELDS:
+            if field.startswith("clinical_"):
+                summary_sheet.append([field, _excel_cell_value(summary_row.get(field, ""))])
+        summary_sheet.append(["summary_csv", str(config.output_csv)])
+
+        stats_sheet = workbook.create_sheet("Frame_ROI_Stats")
+        stats_headers = _excel_stats_headers()
+        stats_sheet.append(stats_headers)
+
+        histogram_sheet = workbook.create_sheet("Histograms")
+        histogram_headers = ["sequence", "frame_index", "frame", "roi"] + [f"gray_{index}" for index in range(256)]
+        histogram_sheet.append(histogram_headers)
+
+        config_sheet = workbook.create_sheet("ROI_Config")
+        config_sheet.append(["roi", "shape", "x", "y", "width", "height", "highlight_mode", "fixed_gray", "baseline_multiplier"])
+        highlight_rule = _normalize_highlight_rule(config.highlight_rule)
+        for roi_name in ROI_NAMES:
+            rect = roi_meta.get(f"{roi_name.lower()}_rect")
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = [int(v) for v in rect]
+            config_sheet.append(
+                [
+                    roi_name,
+                    roi_meta["roi_shapes"].get(roi_name, "rectangle"),
+                    x1,
+                    y1,
+                    x2 - x1,
+                    y2 - y1,
+                    highlight_rule["mode"],
+                    highlight_rule["fixed_gray"],
+                    highlight_rule["baseline_multiplier"],
+                ]
+            )
+
+        for frame_index, frame_path in enumerate(frame_paths, start=1):
+            frame = load_frame(frame_path)
+            stats_by_roi = roi_stats_for_frame_set(frame, roi_meta, baseline_stats)
+            for roi_name in ROI_NAMES:
+                stats = stats_by_roi[roi_name]
+                stats_row = {
+                    "sequence": sequence_dir.name,
+                    "frame_index": frame_index,
+                    "frame": frame_path.name,
+                    "roi": roi_name,
+                    **stats,
+                }
+                stats_sheet.append([_excel_cell_value(stats_row.get(header, "")) for header in stats_headers])
+                histogram_sheet.append(
+                    [sequence_dir.name, frame_index, frame_path.name, roi_name]
+                    + [int(value) for value in stats.get("histogram", [0] * 256)]
+                )
+
+        workbook.save(output_path)
+        LOGGER.info("excel_export_complete sequence=%s output_path=%s frames=%s", sequence_dir.name, output_path, len(frame_paths))
+        return output_path
+    except Exception:
+        LOGGER.exception("excel_export_failed sequence=%s output_path=%s", sequence_dir.name, output_path)
+        raise
+    finally:
+        close_diagnostic_logging()
 
 
 def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
@@ -1791,6 +1929,8 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     parser.add_argument("--clinical-after-offsets", help='Comma-separated frame offsets relative to selected after frame, e.g. "0,1,2,3,4" or "-1,0".')
     parser.add_argument("--clinical-effective-threshold", type=float, default=DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD, help="Delta mean/median threshold for effective emission. Default: 1.5.")
     parser.add_argument("--clinical-strength-threshold", type=float, default=DEFAULT_CLINICAL_STRENGTH_THRESHOLD, help="Delta mean/median threshold for strong emission. Default: 3.0.")
+    parser.add_argument("--log-file", help="Optional diagnostic log file path.")
+    parser.add_argument("--log-level", default=DEFAULT_LOG_LEVEL, choices=sorted(LOG_LEVELS), help="Diagnostic log level.")
     parser.add_argument("--gui", action="store_true", help="Open the single-file GUI instead of running CLI analysis.")
     args = parser.parse_args(argv)
 
@@ -1844,6 +1984,8 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         clinical_after_offsets=clinical_after_offsets,
         clinical_effective_threshold=clinical_effective_threshold,
         clinical_strength_threshold=clinical_strength_threshold,
+        log_file=Path(args.log_file) if args.log_file else None,
+        log_level=_normalize_log_level(args.log_level),
     )
 
 
@@ -1917,6 +2059,8 @@ class HemRoi2BatchAnalyzerGui:
         self.clinical_after_offsets = tk.StringVar(value="")
         self.clinical_effective_threshold = tk.StringVar(value=str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD))
         self.clinical_strength_threshold = tk.StringVar(value=str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD))
+        self.log_file = tk.StringVar(value=str(DEFAULT_GUI_LOG_FILE))
+        self.log_level = tk.StringVar(value=DEFAULT_LOG_LEVEL)
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
         self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
@@ -2160,6 +2304,7 @@ class HemRoi2BatchAnalyzerGui:
         row = self._path_row(paths, row, "配置JSON", self.settings_path, "file")
         row = self._path_row(paths, row, "焦点CSV", self.focus_points_csv, "file")
         row = self._path_row(paths, row, "Excel导出目录", self.excel_output_dir, "dir")
+        row = self._path_row(paths, row, "诊断日志", self.log_file, "save_log")
 
         focus = ttk.LabelFrame(content, text="焦点设置", padding=8)
         focus.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -2270,7 +2415,15 @@ class HemRoi2BatchAnalyzerGui:
         row = self._entry_row(analysis, row, "临床前窗口偏移", self.clinical_before_offsets, "如 -4,-3,-2,-1,0；留空则不输出临床判定")
         row = self._entry_row(analysis, row, "临床后窗口偏移", self.clinical_after_offsets, "如 0,1,2,3,4 或 -1,0")
         row = self._entry_row(analysis, row, "有效阈值", self.clinical_effective_threshold, "默认1.5，Δmean或Δmedian达标")
-        self._entry_row(analysis, row, "强阳阈值", self.clinical_strength_threshold, "默认3.0，Δmean或Δmedian达标")
+        row = self._entry_row(analysis, row, "强阳阈值", self.clinical_strength_threshold, "默认3.0，Δmean或Δmedian达标")
+        ttk.Label(analysis, text="日志级别").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            analysis,
+            textvariable=self.log_level,
+            values=tuple(sorted(LOG_LEVELS)),
+            state="readonly",
+            width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
 
         actions = ttk.Frame(content)
         actions.grid(row=6, column=0, sticky="ew", pady=(10, 0))
@@ -2391,6 +2544,8 @@ class HemRoi2BatchAnalyzerGui:
             self.clinical_after_offsets,
             self.clinical_effective_threshold,
             self.clinical_strength_threshold,
+            self.log_file,
+            self.log_level,
         ]
 
         for var in live_preview_vars:
@@ -2592,6 +2747,8 @@ class HemRoi2BatchAnalyzerGui:
             clinical_after_offsets=self._var_value("clinical_after_offsets", ""),
             clinical_effective_threshold=self._var_value("clinical_effective_threshold", str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD)),
             clinical_strength_threshold=self._var_value("clinical_strength_threshold", str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD)),
+            log_file=self._var_value("log_file", ""),
+            log_level=self._var_value("log_level", DEFAULT_LOG_LEVEL),
         )
 
     def load_settings_defaults(self) -> None:
@@ -2673,6 +2830,8 @@ class HemRoi2BatchAnalyzerGui:
             config.clinical_after_offsets,
             config.clinical_effective_threshold,
             config.clinical_strength_threshold,
+            str(config.log_file) if config.log_file is not None else "",
+            config.log_level,
         )
 
     def _reset_step_state(self, config: AnalyzerConfig) -> None:
@@ -2993,24 +3152,40 @@ class HemRoi2BatchAnalyzerGui:
         self.status.set(f"正在分析当前序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}")
 
         def finish_success(row: dict[str, str], frame_rows: list[dict[str, str]]) -> None:
-            sequence_name = row["sequence"]
-            if sequence_name in self._analyzed_sequences:
-                self._step_summary_rows = [saved for saved in self._step_summary_rows if saved["sequence"] != sequence_name]
-                self._step_frame_rows = [saved for saved in self._step_frame_rows if saved["sequence"] != sequence_name]
-            self._step_summary_rows.append(row)
-            self._step_frame_rows.extend(frame_rows)
-            self._analyzed_sequences.add(sequence_name)
-            self._step_next_index = self._current_sequence_index + 1
-            write_csv(config.output_csv, SUMMARY_FIELDS, self._step_summary_rows)
-            if config.per_frame_csv is not None:
-                write_csv(config.per_frame_csv, FRAME_FIELDS, self._step_frame_rows)
-            self._analysis_running = False
-            self.run_button.state(["!disabled"])
-            color_text = "绿" if row["roi2_color"] == "green" else "红"
-            self.status.set(
-                f"已分析当前序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}。"
-                f" 结果={color_text} ROI2差值={row['roi2_diff']} 汇总={config.output_csv}"
-            )
+            try:
+                sequence_name = row["sequence"]
+                if sequence_name in self._analyzed_sequences:
+                    self._step_summary_rows = [saved for saved in self._step_summary_rows if saved["sequence"] != sequence_name]
+                    self._step_frame_rows = [saved for saved in self._step_frame_rows if saved["sequence"] != sequence_name]
+                self._step_summary_rows.append(row)
+                self._step_frame_rows.extend(frame_rows)
+                self._analyzed_sequences.add(sequence_name)
+                self._step_next_index = self._current_sequence_index + 1
+                write_csv(config.output_csv, SUMMARY_FIELDS, self._step_summary_rows)
+                if config.per_frame_csv is not None:
+                    write_csv(config.per_frame_csv, FRAME_FIELDS, self._step_frame_rows)
+                LOGGER.info(
+                    "gui_sequence_analysis_complete sequence=%s output_csv=%s per_frame_csv=%s",
+                    sequence_name,
+                    config.output_csv,
+                    config.per_frame_csv,
+                )
+                self._analysis_running = False
+                self.run_button.state(["!disabled"])
+                color_text = "绿" if row["roi2_color"] == "green" else "红"
+                self.status.set(
+                    f"已分析当前序列 {self._current_sequence_index + 1}/{total}: {sequence_dir.name}。"
+                    f" 结果={color_text} ROI2差值={row['roi2_diff']} 汇总={config.output_csv}"
+                )
+            except Exception as exc:
+                LOGGER.exception("gui_sequence_analysis_failed sequence=%s", sequence_dir.name)
+                self._analysis_running = False
+                self.run_button.state(["!disabled"])
+                self.status.set(f"分析失败：{exc}")
+                close_diagnostic_logging()
+                messagebox.showerror("分析失败", str(exc))
+                return
+            close_diagnostic_logging()
             messagebox.showinfo(
                 "当前序列分析完成",
                 f"序列：{sequence_dir.name}\n"
@@ -3020,16 +3195,26 @@ class HemRoi2BatchAnalyzerGui:
             )
 
         def finish_error(exc: Exception) -> None:
+            LOGGER.error("gui_sequence_analysis_failed sequence=%s error=%s", sequence_dir.name, exc)
             self._analysis_running = False
             self.run_button.state(["!disabled"])
             self.status.set(f"分析失败：{exc}")
+            close_diagnostic_logging()
             messagebox.showerror("分析失败", str(exc))
 
         def worker() -> None:
             try:
+                _ensure_diagnostic_logging(config)
+                LOGGER.info(
+                    "gui_sequence_analysis_start sequence=%s index=%s total=%s",
+                    sequence_dir.name,
+                    self._current_sequence_index + 1,
+                    total,
+                )
                 focus_points = load_focus_points_csv(config.focus_points_csv)
                 row, frame_rows = analyze_sequence(sequence_dir, config, focus_points)
             except Exception as exc:
+                LOGGER.exception("gui_sequence_analysis_failed sequence=%s", sequence_dir.name)
                 self.root.after(0, finish_error, exc)
                 return
             self.root.after(0, finish_success, row, frame_rows)
