@@ -21,6 +21,14 @@ def write_frame(path: Path, value: int, size=(20, 20)) -> None:
     Image.fromarray(arr).save(path)
 
 
+def write_clinical_roi_frame(path: Path, roi_value: int, corner_value: int, size=(12, 12)) -> None:
+    arr = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    arr[2:8, 2:8, :] = roi_value
+    for y, x in ((2, 2), (2, 7), (7, 2), (7, 7)):
+        arr[y, x, :] = corner_value
+    Image.fromarray(arr).save(path)
+
+
 class HemRoi2BatchAnalyzerTests(unittest.TestCase):
     def test_default_focus_point_matches_current_algorithm_focus(self):
         self.assertEqual(
@@ -74,6 +82,73 @@ class HemRoi2BatchAnalyzerTests(unittest.TestCase):
             self.assertEqual(row["roi2_color"], "green")
             self.assertEqual(row["after_frame_index"], "2")
             self.assertEqual(len(frames), 3)
+
+    def test_clinical_window_metrics_use_configured_ellipse_roi(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seq = root / "seq"
+            seq.mkdir()
+            write_clinical_roi_frame(seq / "00001_2026-06-14_00-00-00.000_frame.png", 10, 100)
+            write_clinical_roi_frame(seq / "00002_2026-06-14_00-00-00.070_frame.png", 10, 100)
+            write_clinical_roi_frame(seq / "00003_2026-06-14_00-00-00.140_frame.png", 11, 101)
+            write_clinical_roi_frame(seq / "00004_2026-06-14_00-00-00.210_frame.png", 12, 102)
+            write_clinical_roi_frame(seq / "00005_2026-06-14_00-00-00.280_frame.png", 14, 104)
+            write_clinical_roi_frame(seq / "00006_2026-06-14_00-00-00.350_frame.png", 14, 104)
+            cfg = analyzer.AnalyzerConfig(
+                root_dir=root,
+                output_csv=root / "summary.csv",
+                per_frame_csv=None,
+                settings_path=None,
+                focus_point="PointF(6, 6)",
+                focus_points_csv=None,
+                provider_depth_mm=100.0,
+                focus_y_offset_mm=0.0,
+                roi2_extension_params={"left": 4, "right": 4, "top": 4, "bottom": 4},
+                difference_threshold=5.0,
+                before_frame_index=2,
+                after_strategy="last",
+                include_selected_debug=False,
+                max_sequences=None,
+                roi_rect_overrides={"ROI2": (2, 2, 8, 8)},
+                roi_definitions={"ROI2": {"shape": "ellipse", "rect": (2, 2, 8, 8)}},
+                clinical_before_offsets=(-1, 0),
+                clinical_after_offsets=(-1, 0),
+            )
+
+            row, frames = analyzer.analyze_sequence(seq, cfg, {})
+
+            self.assertEqual(row["clinical_roi"], "ROI2")
+            self.assertEqual(row["clinical_roi_shape"], "ellipse")
+            self.assertEqual(row["clinical_roi_rect"], "2,2,8,8")
+            self.assertEqual(row["clinical_before_frame_indices"], "1,2")
+            self.assertEqual(row["clinical_after_frame_indices"], "5,6")
+            self.assertEqual(row["clinical_before_mean"], "10.000000")
+            self.assertEqual(row["clinical_before_median"], "10.000000")
+            self.assertEqual(row["clinical_after_mean"], "14.000000")
+            self.assertEqual(row["clinical_after_median"], "14.000000")
+            self.assertEqual(row["clinical_delta_mean"], "4.000000")
+            self.assertEqual(row["clinical_delta_median"], "4.000000")
+            self.assertEqual(row["clinical_effective"], "有效")
+            self.assertEqual(row["clinical_strength"], "强阳")
+            self.assertEqual(frames[0]["clinical_roi_mean"], "10.000000")
+
+    def test_clinical_judgement_uses_mean_or_median_thresholds(self):
+        self.assertEqual(
+            analyzer.classify_clinical_hem_delta(1.4, 1.5, 1.5, 3.0),
+            {
+                "clinical_effective": "有效",
+                "clinical_strength": "一般",
+                "clinical_recommendation": "一般发射，建议增加功率或补充发射",
+            },
+        )
+        self.assertEqual(
+            analyzer.classify_clinical_hem_delta(0.0, 0.0, 1.5, 3.0),
+            {
+                "clinical_effective": "无效",
+                "clinical_strength": "无效",
+                "clinical_recommendation": "无效发射，需要重新发射",
+            },
+        )
 
     def test_write_outputs_creates_summary_csv(self):
         with tempfile.TemporaryDirectory() as tmp:

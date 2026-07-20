@@ -56,6 +56,9 @@ ROI2_DEFAULT_PARAMS = {"left": 40, "right": 40, "top": 50, "bottom": 30}
 ROI3_DEFAULT_PARAMS = {"left": 30, "right": 30, "top": 50, "bottom": 100}
 HEM_THRESHOLD_MEAN_MULTIPLIER = 1.15
 HEM_Z_SCORE_THRESHOLD = 3.0
+DEFAULT_CLINICAL_ROI = "ROI2"
+DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD = 1.5
+DEFAULT_CLINICAL_STRENGTH_THRESHOLD = 3.0
 
 ROI_STAT_DISPLAY_FIELDS = [
     ("rect", "位置"),
@@ -120,6 +123,24 @@ SUMMARY_FIELDS = [
     "difference_threshold",
     "roi2_color",
     "after_strategy",
+    "clinical_roi",
+    "clinical_roi_shape",
+    "clinical_roi_rect",
+    "clinical_before_frame_indices",
+    "clinical_before_frames",
+    "clinical_before_mean",
+    "clinical_before_median",
+    "clinical_after_frame_indices",
+    "clinical_after_frames",
+    "clinical_after_mean",
+    "clinical_after_median",
+    "clinical_delta_mean",
+    "clinical_delta_median",
+    "clinical_effective_threshold",
+    "clinical_strength_threshold",
+    "clinical_effective",
+    "clinical_strength",
+    "clinical_recommendation",
 ]
 
 FRAME_FIELDS = [
@@ -128,6 +149,8 @@ FRAME_FIELDS = [
     "frame",
     "roi2_mean",
     "roi2_diff_from_before",
+    "clinical_roi_mean",
+    "clinical_roi_median",
 ]
 
 
@@ -154,6 +177,11 @@ class AnalyzerConfig:
     roi_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
     highlight_rule: dict[str, Any] = field(default_factory=dict)
     excel_output_dir: Path = DEFAULT_EXCEL_OUTPUT_DIR
+    clinical_roi: str = DEFAULT_CLINICAL_ROI
+    clinical_before_offsets: Optional[tuple[int, ...]] = None
+    clinical_after_offsets: Optional[tuple[int, ...]] = None
+    clinical_effective_threshold: float = DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD
+    clinical_strength_threshold: float = DEFAULT_CLINICAL_STRENGTH_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -190,6 +218,11 @@ class GuiState:
     highlight_fixed_gray: str = str(DEFAULT_FIXED_GRAY_THRESHOLD)
     highlight_baseline_multiplier: str = str(HEM_THRESHOLD_MEAN_MULTIPLIER)
     excel_output_dir: str = str(DEFAULT_EXCEL_OUTPUT_DIR)
+    clinical_roi: str = DEFAULT_CLINICAL_ROI
+    clinical_before_offsets: str = ""
+    clinical_after_offsets: str = ""
+    clinical_effective_threshold: str = str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD)
+    clinical_strength_threshold: str = str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD)
 
 
 def _fmt_float(value: Optional[float]) -> str:
@@ -615,6 +648,45 @@ def _required_int(text: str, name: str) -> int:
     return value
 
 
+def _parse_optional_int_offsets(text: str, name: str) -> Optional[tuple[int, ...]]:
+    stripped = str(text).strip()
+    if not stripped:
+        return None
+    parts = [part for part in re.split(r"[,\s]+", stripped) if part]
+    if not parts:
+        return None
+    offsets: list[int] = []
+    for part in parts:
+        try:
+            offsets.append(int(part))
+        except ValueError as exc:
+            raise ValueError(f"{name} must contain integer offsets separated by commas") from exc
+    return tuple(offsets)
+
+
+def _parse_cli_int_offsets(text: Optional[str], name: str) -> Optional[tuple[int, ...]]:
+    if text is None:
+        return None
+    return _parse_optional_int_offsets(text, name)
+
+
+def _validate_clinical_thresholds(effective_threshold: float, strength_threshold: float) -> tuple[float, float]:
+    effective = float(effective_threshold)
+    strength = float(strength_threshold)
+    if effective <= 0:
+        raise ValueError("clinical effective threshold must be > 0")
+    if strength < effective:
+        raise ValueError("clinical strength threshold must be >= effective threshold")
+    return effective, strength
+
+
+def _normalize_clinical_roi(value: Any) -> str:
+    roi_name = str(value or DEFAULT_CLINICAL_ROI).strip().upper()
+    if roi_name not in ROI_NAMES:
+        raise ValueError(f"clinical ROI must be one of: {', '.join(ROI_NAMES)}")
+    return roi_name
+
+
 def _roi_params_from_state(
     left: str,
     right: str,
@@ -706,6 +778,20 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
     after_strategy = AFTER_STRATEGY_LABELS.get(after_strategy_text, after_strategy_text)
     if after_strategy not in {"roi2_peak", "last"}:
         raise ValueError(f"不支持的治疗后帧选择：{after_strategy_text}")
+    clinical_before_offsets = _parse_optional_int_offsets(state.clinical_before_offsets, "临床发射前窗口偏移")
+    clinical_after_offsets = _parse_optional_int_offsets(state.clinical_after_offsets, "临床发射后窗口偏移")
+    if (clinical_before_offsets is None) != (clinical_after_offsets is None):
+        raise ValueError("临床发射前/后窗口偏移需要同时填写，或同时留空")
+    clinical_effective_threshold = _optional_float(state.clinical_effective_threshold, "临床有效阈值")
+    clinical_strength_threshold = _optional_float(state.clinical_strength_threshold, "临床强度阈值")
+    clinical_effective_threshold, clinical_strength_threshold = _validate_clinical_thresholds(
+        clinical_effective_threshold
+        if clinical_effective_threshold is not None
+        else DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD,
+        clinical_strength_threshold
+        if clinical_strength_threshold is not None
+        else DEFAULT_CLINICAL_STRENGTH_THRESHOLD,
+    )
     return AnalyzerConfig(
         root_dir=Path(root_text),
         output_csv=Path(output_text),
@@ -730,6 +816,11 @@ def config_from_gui_state(state: GuiState) -> AnalyzerConfig:
         roi_definitions=roi_definitions,
         highlight_rule=highlight_rule,
         excel_output_dir=Path(state.excel_output_dir.strip()) if state.excel_output_dir.strip() else _settings_excel_output_dir(settings),
+        clinical_roi=_normalize_clinical_roi(state.clinical_roi),
+        clinical_before_offsets=clinical_before_offsets,
+        clinical_after_offsets=clinical_after_offsets,
+        clinical_effective_threshold=clinical_effective_threshold,
+        clinical_strength_threshold=clinical_strength_threshold,
     )
 
 
@@ -1249,6 +1340,189 @@ def choose_after_index(frame_means: list[float], before_index_zero_based: int, s
     raise ValueError(f"unsupported after_strategy: {strategy}")
 
 
+def _clinical_enabled(config: AnalyzerConfig) -> bool:
+    return config.clinical_before_offsets is not None or config.clinical_after_offsets is not None
+
+
+def classify_clinical_hem_delta(
+    delta_mean: float,
+    delta_median: float,
+    effective_threshold: float = DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD,
+    strength_threshold: float = DEFAULT_CLINICAL_STRENGTH_THRESHOLD,
+) -> dict[str, str]:
+    effective_threshold, strength_threshold = _validate_clinical_thresholds(effective_threshold, strength_threshold)
+    effective = float(delta_mean) >= effective_threshold or float(delta_median) >= effective_threshold
+    if not effective:
+        return {
+            "clinical_effective": "无效",
+            "clinical_strength": "无效",
+            "clinical_recommendation": "无效发射，需要重新发射",
+        }
+    strong = float(delta_mean) >= strength_threshold or float(delta_median) >= strength_threshold
+    if strong:
+        return {
+            "clinical_effective": "有效",
+            "clinical_strength": "强阳",
+            "clinical_recommendation": "消融强度足够",
+        }
+    return {
+        "clinical_effective": "有效",
+        "clinical_strength": "一般",
+        "clinical_recommendation": "一般发射，建议增加功率或补充发射",
+    }
+
+
+def _empty_clinical_summary() -> dict[str, str]:
+    return {
+        "clinical_roi": "",
+        "clinical_roi_shape": "",
+        "clinical_roi_rect": "",
+        "clinical_before_frame_indices": "",
+        "clinical_before_frames": "",
+        "clinical_before_mean": "",
+        "clinical_before_median": "",
+        "clinical_after_frame_indices": "",
+        "clinical_after_frames": "",
+        "clinical_after_mean": "",
+        "clinical_after_median": "",
+        "clinical_delta_mean": "",
+        "clinical_delta_median": "",
+        "clinical_effective_threshold": "",
+        "clinical_strength_threshold": "",
+        "clinical_effective": "",
+        "clinical_strength": "",
+        "clinical_recommendation": "",
+    }
+
+
+def _validate_clinical_offsets(config: AnalyzerConfig) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    before_offsets = config.clinical_before_offsets
+    after_offsets = config.clinical_after_offsets
+    if before_offsets is None and after_offsets is None:
+        raise ValueError("clinical offsets are not configured")
+    if before_offsets is None or after_offsets is None:
+        raise ValueError("clinical before and after offsets must be configured together")
+    if not before_offsets:
+        raise ValueError("clinical before offsets must not be empty")
+    if not after_offsets:
+        raise ValueError("clinical after offsets must not be empty")
+    return tuple(int(value) for value in before_offsets), tuple(int(value) for value in after_offsets)
+
+
+def _clinical_window_indices(
+    frame_count: int,
+    base_index: int,
+    offsets: tuple[int, ...],
+    label: str,
+    sequence_name: str,
+) -> list[int]:
+    indices: list[int] = []
+    for offset in offsets:
+        index = int(base_index) + int(offset)
+        if index < 0 or index >= frame_count:
+            raise ValueError(
+                f"clinical {label} frame offset {offset} is outside sequence {sequence_name}: "
+                f"resolved frame index {index + 1} not in 1..{frame_count}"
+            )
+        indices.append(index)
+    return indices
+
+
+def _resolve_clinical_roi(
+    first_frame: np.ndarray,
+    focus_anchor: tuple[int, int],
+    config: AnalyzerConfig,
+) -> tuple[str, str, tuple[int, int, int, int]]:
+    roi_name = _normalize_clinical_roi(config.clinical_roi)
+    roi_meta = resolve_roi_rects(
+        first_frame,
+        focus_anchor,
+        config,
+        include_roi3=roi_name == "ROI3",
+        include_roi4=roi_name == "ROI4",
+    )
+    rect = roi_meta.get(f"{roi_name.lower()}_rect")
+    if rect is None:
+        raise ValueError(f"clinical ROI {roi_name} could not be resolved")
+    shape = roi_meta["roi_shapes"].get(roi_name, "rectangle")
+    return roi_name, shape, tuple(int(value) for value in rect)
+
+
+def _roi_gray_summary_for_path(path: Path, rect: tuple[int, int, int, int], shape: str) -> tuple[float, float, np.ndarray]:
+    pixels = _roi_gray_pixels(load_frame(path), rect, shape)
+    if pixels.size == 0:
+        raise ValueError(f"clinical ROI has no pixels in frame: {path}")
+    return float(np.mean(pixels)), float(np.median(pixels)), pixels
+
+
+def _clinical_window_summary(
+    frame_paths: list[Path],
+    indices: list[int],
+    rect: tuple[int, int, int, int],
+    shape: str,
+) -> tuple[float, float]:
+    all_pixels = []
+    for index in indices:
+        _mean, _median, pixels = _roi_gray_summary_for_path(frame_paths[index], rect, shape)
+        all_pixels.append(pixels)
+    pixels = np.concatenate(all_pixels) if all_pixels else np.asarray([], dtype=np.float64)
+    if pixels.size == 0:
+        raise ValueError("clinical ROI window has no pixels")
+    return float(np.mean(pixels)), float(np.median(pixels))
+
+
+def calculate_clinical_hem_metrics(
+    sequence_name: str,
+    frame_paths: list[Path],
+    first_frame: np.ndarray,
+    focus_anchor: tuple[int, int],
+    before_index: int,
+    after_index: int,
+    config: AnalyzerConfig,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    before_offsets, after_offsets = _validate_clinical_offsets(config)
+    effective_threshold, strength_threshold = _validate_clinical_thresholds(
+        config.clinical_effective_threshold,
+        config.clinical_strength_threshold,
+    )
+    roi_name, shape, rect = _resolve_clinical_roi(first_frame, focus_anchor, config)
+    before_indices = _clinical_window_indices(len(frame_paths), before_index, before_offsets, "before", sequence_name)
+    after_indices = _clinical_window_indices(len(frame_paths), after_index, after_offsets, "after", sequence_name)
+    before_mean, before_median = _clinical_window_summary(frame_paths, before_indices, rect, shape)
+    after_mean, after_median = _clinical_window_summary(frame_paths, after_indices, rect, shape)
+    delta_mean = after_mean - before_mean
+    delta_median = after_median - before_median
+    judgement = classify_clinical_hem_delta(delta_mean, delta_median, effective_threshold, strength_threshold)
+    summary = {
+        "clinical_roi": roi_name,
+        "clinical_roi_shape": shape,
+        "clinical_roi_rect": _fmt_rect(rect),
+        "clinical_before_frame_indices": ",".join(str(index + 1) for index in before_indices),
+        "clinical_before_frames": ",".join(frame_paths[index].name for index in before_indices),
+        "clinical_before_mean": _fmt_float(before_mean),
+        "clinical_before_median": _fmt_float(before_median),
+        "clinical_after_frame_indices": ",".join(str(index + 1) for index in after_indices),
+        "clinical_after_frames": ",".join(frame_paths[index].name for index in after_indices),
+        "clinical_after_mean": _fmt_float(after_mean),
+        "clinical_after_median": _fmt_float(after_median),
+        "clinical_delta_mean": _fmt_float(delta_mean),
+        "clinical_delta_median": _fmt_float(delta_median),
+        "clinical_effective_threshold": _fmt_float(effective_threshold),
+        "clinical_strength_threshold": _fmt_float(strength_threshold),
+        **judgement,
+    }
+    frame_summaries = []
+    for path in frame_paths:
+        mean, median, _pixels = _roi_gray_summary_for_path(path, rect, shape)
+        frame_summaries.append(
+            {
+                "clinical_roi_mean": _fmt_float(mean),
+                "clinical_roi_median": _fmt_float(median),
+            }
+        )
+    return summary, frame_summaries
+
+
 def analyze_sequence(
     sequence_dir: Path,
     config: AnalyzerConfig,
@@ -1293,6 +1567,22 @@ def analyze_sequence(
         "roi2_color": roi2_color,
         "after_strategy": config.after_strategy,
     }
+    clinical_frame_summaries = [
+        {"clinical_roi_mean": "", "clinical_roi_median": ""}
+        for _path in frame_paths
+    ]
+    row.update(_empty_clinical_summary())
+    if _clinical_enabled(config):
+        clinical_summary, clinical_frame_summaries = calculate_clinical_hem_metrics(
+            sequence_dir.name,
+            frame_paths,
+            first_frame,
+            focus_anchor,
+            before_index,
+            after_index,
+            config,
+        )
+        row.update(clinical_summary)
     frame_rows = []
     for index, path in enumerate(frame_paths):
         frame_rows.append(
@@ -1302,6 +1592,7 @@ def analyze_sequence(
                 "frame": path.name,
                 "roi2_mean": _fmt_float(frame_means[index]),
                 "roi2_diff_from_before": _fmt_float(float(frame_means[index]) - float(before_mean)),
+                **clinical_frame_summaries[index],
             }
         )
     return row, frame_rows
@@ -1422,6 +1713,9 @@ def export_sequence_excel(
     summary_sheet.append(["baseline_multiplier", _normalize_highlight_rule(config.highlight_rule)["baseline_multiplier"]])
     summary_sheet.append(["roi2_color", summary_row["roi2_color"]])
     summary_sheet.append(["roi2_diff", summary_row["roi2_diff"]])
+    for field in SUMMARY_FIELDS:
+        if field.startswith("clinical_"):
+            summary_sheet.append([field, _excel_cell_value(summary_row.get(field, ""))])
     summary_sheet.append(["summary_csv", str(config.output_csv)])
 
     stats_sheet = workbook.create_sheet("Frame_ROI_Stats")
@@ -1492,6 +1786,11 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
     parser.add_argument("--after-strategy", choices=["roi2_peak", "last"], default="roi2_peak", help="After frame selection strategy.")
     parser.add_argument("--include-selected-debug", action="store_true", help="Include selected_*.png debug images in frame analysis.")
     parser.add_argument("--max-sequences", type=int, help="Limit analyzed sequence count for smoke runs.")
+    parser.add_argument("--clinical-roi", default=DEFAULT_CLINICAL_ROI, choices=list(ROI_NAMES), help="ROI used for clinical HEM gray-window judgement.")
+    parser.add_argument("--clinical-before-offsets", help='Comma-separated frame offsets relative to before_frame_index, e.g. "-4,-3,-2,-1,0" or "-1,0".')
+    parser.add_argument("--clinical-after-offsets", help='Comma-separated frame offsets relative to selected after frame, e.g. "0,1,2,3,4" or "-1,0".')
+    parser.add_argument("--clinical-effective-threshold", type=float, default=DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD, help="Delta mean/median threshold for effective emission. Default: 1.5.")
+    parser.add_argument("--clinical-strength-threshold", type=float, default=DEFAULT_CLINICAL_STRENGTH_THRESHOLD, help="Delta mean/median threshold for strong emission. Default: 3.0.")
     parser.add_argument("--gui", action="store_true", help="Open the single-file GUI instead of running CLI analysis.")
     args = parser.parse_args(argv)
 
@@ -1509,6 +1808,14 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         float(args.difference_threshold)
         if args.difference_threshold is not None
         else _settings_difference_threshold(settings)
+    )
+    clinical_before_offsets = _parse_cli_int_offsets(args.clinical_before_offsets, "--clinical-before-offsets")
+    clinical_after_offsets = _parse_cli_int_offsets(args.clinical_after_offsets, "--clinical-after-offsets")
+    if (clinical_before_offsets is None) != (clinical_after_offsets is None):
+        raise ValueError("--clinical-before-offsets and --clinical-after-offsets must be provided together")
+    clinical_effective_threshold, clinical_strength_threshold = _validate_clinical_thresholds(
+        args.clinical_effective_threshold,
+        args.clinical_strength_threshold,
     )
     return AnalyzerConfig(
         root_dir=Path(args.root),
@@ -1532,6 +1839,11 @@ def build_config_from_args(argv: Optional[list[str]] = None) -> AnalyzerConfig:
         roi_definitions=roi_definitions,
         highlight_rule=_settings_highlight_rule(settings),
         excel_output_dir=_settings_excel_output_dir(settings),
+        clinical_roi=_normalize_clinical_roi(args.clinical_roi),
+        clinical_before_offsets=clinical_before_offsets,
+        clinical_after_offsets=clinical_after_offsets,
+        clinical_effective_threshold=clinical_effective_threshold,
+        clinical_strength_threshold=clinical_strength_threshold,
     )
 
 
@@ -1600,6 +1912,11 @@ class HemRoi2BatchAnalyzerGui:
         self.highlight_fixed_gray = tk.StringVar(value=str(highlight_rule["fixed_gray"]))
         self.highlight_baseline_multiplier = tk.StringVar(value=str(highlight_rule["baseline_multiplier"]))
         self.excel_output_dir = tk.StringVar(value=str(_settings_excel_output_dir(settings)))
+        self.clinical_roi = tk.StringVar(value=DEFAULT_CLINICAL_ROI)
+        self.clinical_before_offsets = tk.StringVar(value="")
+        self.clinical_after_offsets = tk.StringVar(value="")
+        self.clinical_effective_threshold = tk.StringVar(value=str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD))
+        self.clinical_strength_threshold = tk.StringVar(value=str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD))
         self.difference_threshold = tk.StringVar(value=str(_settings_difference_threshold(settings)))
         self.before_frame_index = tk.StringVar(value="1")
         self.after_strategy = tk.StringVar(value=AFTER_STRATEGY_VALUES["roi2_peak"])
@@ -1940,7 +2257,20 @@ class HemRoi2BatchAnalyzerGui:
         ).grid(row=row, column=1, sticky="w", pady=4)
         row += 1
         row = self._entry_row(analysis, row, "固定灰度阈值", self.highlight_fixed_gray, "0~255，固定灰度值模式生效")
-        self._entry_row(analysis, row, "基线倍数", self.highlight_baseline_multiplier, "基线倍数模式生效")
+        row = self._entry_row(analysis, row, "基线倍数", self.highlight_baseline_multiplier, "基线倍数模式生效")
+        ttk.Label(analysis, text="临床HEM ROI").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            analysis,
+            textvariable=self.clinical_roi,
+            values=ROI_NAMES,
+            state="readonly",
+            width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+        row = self._entry_row(analysis, row, "临床前窗口偏移", self.clinical_before_offsets, "如 -4,-3,-2,-1,0；留空则不输出临床判定")
+        row = self._entry_row(analysis, row, "临床后窗口偏移", self.clinical_after_offsets, "如 0,1,2,3,4 或 -1,0")
+        row = self._entry_row(analysis, row, "有效阈值", self.clinical_effective_threshold, "默认1.5，Δmean或Δmedian达标")
+        self._entry_row(analysis, row, "强阳阈值", self.clinical_strength_threshold, "默认3.0，Δmean或Δmedian达标")
 
         actions = ttk.Frame(content)
         actions.grid(row=6, column=0, sticky="ew", pady=(10, 0))
@@ -2056,6 +2386,11 @@ class HemRoi2BatchAnalyzerGui:
             self.difference_threshold,
             self.before_frame_index,
             self.after_strategy,
+            self.clinical_roi,
+            self.clinical_before_offsets,
+            self.clinical_after_offsets,
+            self.clinical_effective_threshold,
+            self.clinical_strength_threshold,
         ]
 
         for var in live_preview_vars:
@@ -2211,6 +2546,12 @@ class HemRoi2BatchAnalyzerGui:
         self.refresh_preview()
         self.status.set(f"ROI/高亮设置已保存到 {settings_path}，当前预览已刷新。")
 
+    def _var_value(self, name: str, default: str = "") -> str:
+        var = getattr(self, name, None)
+        if var is None:
+            return default
+        return var.get()
+
     def current_state(self) -> GuiState:
         self._sync_focus_point_from_xy(strict=True)
         return GuiState(
@@ -2246,6 +2587,11 @@ class HemRoi2BatchAnalyzerGui:
             highlight_fixed_gray=self.highlight_fixed_gray.get(),
             highlight_baseline_multiplier=self.highlight_baseline_multiplier.get(),
             excel_output_dir=self.excel_output_dir.get(),
+            clinical_roi=self._var_value("clinical_roi", DEFAULT_CLINICAL_ROI),
+            clinical_before_offsets=self._var_value("clinical_before_offsets", ""),
+            clinical_after_offsets=self._var_value("clinical_after_offsets", ""),
+            clinical_effective_threshold=self._var_value("clinical_effective_threshold", str(DEFAULT_CLINICAL_EFFECTIVE_THRESHOLD)),
+            clinical_strength_threshold=self._var_value("clinical_strength_threshold", str(DEFAULT_CLINICAL_STRENGTH_THRESHOLD)),
         )
 
     def load_settings_defaults(self) -> None:
@@ -2322,6 +2668,11 @@ class HemRoi2BatchAnalyzerGui:
             config.after_strategy,
             config.include_selected_debug,
             config.max_sequences,
+            config.clinical_roi,
+            config.clinical_before_offsets,
+            config.clinical_after_offsets,
+            config.clinical_effective_threshold,
+            config.clinical_strength_threshold,
         )
 
     def _reset_step_state(self, config: AnalyzerConfig) -> None:
