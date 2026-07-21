@@ -15,4 +15,7 @@ Add algorithm-server support for the VeinTreat screenshot button to save capture
 - `resource\pywrapper\api_server.py` compiles.
 
 ## Current Status
-ready_for_closeout
+blocked_on_release_publish
+
+## Remaining Blocker
+- `publish_release.bat` hardcodes `D:\ocr3`, but the worktree contains unrelated pre-existing dirty changes in `resource/pywrapper/api_server.py`, `resource/pywrapper/test_api_server.py`, tools, pycache, and other files. Running the release script from this state would package non-task code, so release publish is blocked until those unrelated changes are committed, shelved, or moved out of `D:\ocr3`.

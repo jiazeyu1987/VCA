@@ -9,3 +9,5 @@
 - GREEN: `python -m unittest test_api_server.ApiServerTests.test_offline_save_test_data_frames_writes_timestamped_png_sequence` -> PASS.
 - GREEN: `python -m unittest test_api_server.ApiServerTests.test_parse_offline_config_reads_roi_and_debug_settings test_api_server.ApiServerTests.test_offline_save_test_data_frames_writes_timestamped_png_sequence test_api_server.ApiServerTests.test_offline_switch_waits_for_previous_capture_done_before_new_start test_api_server.ApiServerTests.test_offline_output_logs_flush_and_output_paths test_api_server.ApiServerTests.test_offline_green_save_logs_main_program_state_sync` -> PASS.
 - GREEN: `python -m py_compile resource\pywrapper\api_server.py resource\pywrapper\test_api_server.py` -> PASS.
+- GREEN: `git push -u origin codex/algorithm-screenshot-test-data-sequence` -> PASS, pushed algorithm-server commit `18663b6`.
+- BLOCKED: `publish_release.bat` not run because it packages hardcoded `D:\ocr3`, and that worktree still has unrelated dirty changes that would be included in the release.
