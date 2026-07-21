@@ -65,6 +65,7 @@ GUIDE_LINE_WIDTH = 3
 GUIDE_LINE_ANGLE_DEGREES = 100.0
 FOCUS_Y_OFFSET_MM = 1.0
 DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH = "D:/software_data/provider_ultrasound_depth_cache.json"
+DEFAULT_TEST_DATA_OUTPUT_DIR = "D:/software_data/test_data"
 ROI4_BOTTOM_REGION_RATIO = 0.3
 ROI4_FALLBACK_AFTER_METHODS = {
     "roi1_boundary_after2_fallback_last",
@@ -136,6 +137,7 @@ class OfflineConfig:
     db_root_dir: Optional[str] = None
     result_flag_path: Optional[str] = None
     provider_ultrasound_depth_cache_path: str = DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH
+    test_data_output_dir: str = DEFAULT_TEST_DATA_OUTPUT_DIR
     focus_guide_angle_degrees: float = GUIDE_LINE_ANGLE_DEGREES
     focus_guide_line_width: int = GUIDE_LINE_WIDTH
     focus_y_offset_mm: float = FOCUS_Y_OFFSET_MM
@@ -211,6 +213,9 @@ class OfflineSession:
     response: dict = field(default_factory=dict)
     frame_buffer: list[OfflineFrameRecord] = field(default_factory=list)
     debug_dir: Optional[str] = None
+    save_test_data_frames: bool = False
+    test_data_dir: Optional[str] = None
+    test_data_frame_count: int = 0
     meta: dict = field(default_factory=dict)
     finalization_stage: Optional[str] = None
     finalization_stage_started_ns: Optional[int] = None
@@ -1274,6 +1279,12 @@ def parse_roi4_after_selector(peak: dict) -> dict:
     return result
 
 
+def build_test_data_timestamp_dir_name(now=None) -> str:
+    if now is None:
+        now = datetime.now()
+    return now.strftime("%Y%m%d%H%M%S")
+
+
 def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfig:
     screenshot_cfg = settings.get("offline_screenshot_test")
     if not isinstance(screenshot_cfg, dict):
@@ -1340,6 +1351,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         "provider_ultrasound_depth_cache_path",
         DEFAULT_ULTRASOUND_DEPTH_CACHE_PATH,
     )
+    test_data_output_dir = settings.get("test_data_output_dir", DEFAULT_TEST_DATA_OUTPUT_DIR)
 
     config = OfflineConfig(
         screenshot_test_enabled=bool(screenshot_cfg.get("enabled", False)),
@@ -1365,6 +1377,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         db_root_dir=str(db_root_dir) if db_root_dir else None,
         result_flag_path=str(result_flag_path) if result_flag_path else None,
         provider_ultrasound_depth_cache_path=str(provider_ultrasound_depth_cache_path),
+        test_data_output_dir=str(test_data_output_dir),
         focus_guide_angle_degrees=focus_guide_angle_degrees,
         focus_guide_line_width=focus_guide_line_width,
         focus_y_offset_mm=focus_y_offset_mm,
@@ -1374,6 +1387,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         "offline config loaded: screenshot_test_enabled=%s screenshot_capture_bbox=%s peak_detect_enabled=%s offline_peak_enabled=%s offline_peak_threshold=%s "
         "roi2_extension_params=%s roi3_extension_params=%s roi4_rect=%s roi4_bottom_region_ratio=%s difference_threshold=%s roi4_after_selector=%s debug_save_enabled=%s "
         "debug_save_dir=%s stop_wait_timeout_seconds=%s image_output_dir=%s db_root_dir=%s result_flag_path=%s provider_ultrasound_depth_cache_path=%s "
+        "test_data_output_dir=%s "
         "focus_guide_angle_degrees=%s focus_guide_line_width=%s focus_y_offset_mm=%s frame_history_offset=%s",
         config.screenshot_test_enabled,
         config.screenshot_capture_bbox,
@@ -1393,6 +1407,7 @@ def parse_offline_config(settings: dict, logger: logging.Logger) -> OfflineConfi
         config.db_root_dir,
         config.result_flag_path,
         config.provider_ultrasound_depth_cache_path,
+        config.test_data_output_dir,
         config.focus_guide_angle_degrees,
         config.focus_guide_line_width,
         config.focus_y_offset_mm,
@@ -1959,6 +1974,7 @@ class OfflineSessionManager:
         except Exception:
             return {"success": False, "info": "invalid_time_out", "point_id": point_id}
         is_save = bool(arg_obj["is_save"])
+        save_test_data_frames = bool(arg_obj.get("save_test_data_frames", False))
         wait_before_capture = bool(arg_obj.get("wait_before_capture", False))
         received_wall_time = online_wall_time()
         received_ts = time.time()
@@ -2026,6 +2042,7 @@ class OfflineSessionManager:
                     received_wall_time,
                     received_ts,
                     received_perf_counter_ns,
+                    save_test_data_frames=save_test_data_frames,
                     wait_before_capture=True,
                 )
             return self._start_locked(
@@ -2035,6 +2052,7 @@ class OfflineSessionManager:
                 received_wall_time,
                 received_ts,
                 received_perf_counter_ns,
+                save_test_data_frames=save_test_data_frames,
             )
 
     def _start_locked(
@@ -2045,6 +2063,7 @@ class OfflineSessionManager:
         received_wall_time: str,
         received_ts: float,
         received_perf_counter_ns: int,
+        save_test_data_frames: bool = False,
         wait_before_capture: bool = False,
     ) -> dict:
         debug_dir = None
@@ -2059,8 +2078,16 @@ class OfflineSessionManager:
             received_ts=received_ts,
             received_perf_counter_ns=received_perf_counter_ns,
             debug_dir=debug_dir,
-            meta={"point_id": point_id, "duration_s": duration_s, "is_save": bool(is_save)},
+            save_test_data_frames=bool(save_test_data_frames),
+            meta={
+                "point_id": point_id,
+                "duration_s": duration_s,
+                "is_save": bool(is_save),
+                "save_test_data_frames": bool(save_test_data_frames),
+            },
         )
+        if session.save_test_data_frames:
+            self._prepare_test_data_frame_dir(session)
         if self._session_recorder is not None:
             self._session_recorder.start_session(
                 point_id=point_id,
@@ -2077,6 +2104,8 @@ class OfflineSessionManager:
             debug_dir=debug_dir,
             duration_s=round(float(duration_s), 6),
             is_save=bool(is_save),
+            save_test_data_frames=bool(save_test_data_frames),
+            test_data_dir=session.test_data_dir,
             peak_detect_enabled=bool(self._config.peak_detect_enabled),
             offline_peak_enabled=bool(self._config.offline_peak_enabled),
         )
@@ -2088,6 +2117,8 @@ class OfflineSessionManager:
             thread_name=session.thread.name if session.thread is not None else None,
             duration_s=round(float(duration_s), 6),
             is_save=bool(is_save),
+            save_test_data_frames=bool(save_test_data_frames),
+            test_data_dir=session.test_data_dir,
             wait_before_capture=bool(wait_before_capture),
         )
         result = {"success": True, "info": "offline_started", "point_id": point_id}
@@ -2136,6 +2167,34 @@ class OfflineSessionManager:
             )
         return result
 
+    def _prepare_test_data_frame_dir(self, session: OfflineSession) -> None:
+        root_dir = Path(self._config.test_data_output_dir)
+        session_dir = root_dir / build_test_data_timestamp_dir_name()
+        session_dir.mkdir(parents=True, exist_ok=False)
+        session.test_data_dir = str(session_dir)
+        session.meta["test_data_dir"] = str(session_dir)
+        self._offline_diag(
+            "test_data_frame_dir_created",
+            point_id=session.point_id,
+            test_data_dir=str(session_dir),
+        )
+
+    def _save_test_data_frame(self, session: OfflineSession, frame: np.ndarray) -> None:
+        if not session.save_test_data_frames:
+            return
+        if not session.test_data_dir:
+            raise RuntimeError("test_data_dir is required before saving test-data frames")
+        frame_index = int(session.test_data_frame_count) + 1
+        frame_path = Path(session.test_data_dir) / f"{frame_index:03d}.png"
+        write_png(frame_path, frame)
+        session.test_data_frame_count = frame_index
+        self._offline_diag(
+            "test_data_frame_saved",
+            point_id=session.point_id,
+            frame_index=frame_index,
+            frame_path=str(frame_path),
+        )
+
     def _stop_locked(self, session: OfflineSession) -> dict:
         session.stop_event.set()
         if self._session_recorder is not None:
@@ -2165,6 +2224,26 @@ class OfflineSessionManager:
         response = dict(session.response or {})
         if response.get("success") is False:
             return response
+        if session.save_test_data_frames:
+            result = {
+                "success": True,
+                "info": "offline_stop_completed" if finished_ok else "offline_stop_timeout",
+                "point_id": session.point_id,
+                "capture_only": True,
+                "save_test_data_frames": True,
+                "test_data_dir": session.test_data_dir,
+                "test_data_frame_count": int(session.test_data_frame_count),
+            }
+            for key, value in response.items():
+                if key not in {"success", "info", "point_id"}:
+                    result[key] = value
+            self._offline_diag(
+                "stop_response_ready",
+                point_id=session.point_id,
+                capture_source="image_matrix",
+                response=safe_json_text(result),
+            )
+            return result
         result = {
             "success": True,
             "info": "offline_stop_completed" if finished_ok else "offline_stop_timeout",
@@ -3033,6 +3112,9 @@ class OfflineSessionManager:
             before_path=response.get("before_path"),
             after_path=response.get("after_path"),
             diff_path=response.get("diff_path"),
+            capture_only=bool(response.get("capture_only")),
+            test_data_dir=response.get("test_data_dir"),
+            test_data_frame_count=response.get("test_data_frame_count"),
         )
 
     def _finalize_session_recording(self, session: OfflineSession, reason: str) -> bool:
@@ -3093,6 +3175,8 @@ class OfflineSessionManager:
             capture_source="image_matrix",
             duration_s=round(float(session.duration_s), 6),
             is_save=bool(session.is_save),
+            save_test_data_frames=bool(session.save_test_data_frames),
+            test_data_dir=session.test_data_dir,
             debug_save_enabled=bool(self._config.debug_save_enabled),
             peak_detect_enabled=bool(self._config.peak_detect_enabled),
             offline_peak_enabled=bool(self._config.offline_peak_enabled),
@@ -3113,7 +3197,7 @@ class OfflineSessionManager:
                         duration_s=round(float(session.duration_s), 6),
                     )
                     break
-                if session.after is not None:
+                if session.after is not None and not session.save_test_data_frames:
                     time.sleep(0.01)
                     continue
                 frame = self._frame_fetcher()
@@ -3123,6 +3207,7 @@ class OfflineSessionManager:
                 last_seq = frame.seq
                 frame_index += 1
                 frame_image = np.array(frame.image, copy=True)
+                self._save_test_data_frame(session, frame_image)
                 roi1_gray = frame_gray_mean(frame_image)
                 frame_tag = "frame" if self._config.offline_peak_enabled else ("before" if frame_index == 1 else "frame")
                 frame_record = OfflineFrameRecord(
@@ -3173,7 +3258,8 @@ class OfflineSessionManager:
                             after_delay_frames=int(self._config.offline_peak_after_delay_frames),
                         )
                 self._append_frame_buffer(session, frame_image, frame.seq, frame.ts, frame_index, frame_record.tag, roi1_gray)
-                time.sleep(0.01)
+                if not session.save_test_data_frames:
+                    time.sleep(0.01)
         except Exception as exc:
             self._logger.exception("OFFLINE session worker failed: point_id=%s", session.point_id)
             worker_error_response = {"success": False, "info": "error_in_detect", "point_id": session.point_id, "error": str(exc)}
@@ -3258,6 +3344,39 @@ class OfflineSessionManager:
                 after_method=session.after_method,
                 buffered_frame_count=len(session.frame_buffer),
             )
+
+            if session.save_test_data_frames:
+                finish_start = self._finalization_stage_begin(
+                    session,
+                    "test_data_frames_finish",
+                    test_data_dir=session.test_data_dir,
+                    test_data_frame_count=int(session.test_data_frame_count),
+                    timed_out=bool(timed_out),
+                )
+                session.response = {
+                    "success": True,
+                    "info": "offline_stop_completed",
+                    "point_id": session.point_id,
+                    "capture_only": True,
+                    "save_test_data_frames": True,
+                    "test_data_dir": session.test_data_dir,
+                    "test_data_frame_count": int(session.test_data_frame_count),
+                    "timed_out": bool(timed_out),
+                    "frame_count": int(frame_index),
+                }
+                self._finalization_stage_end(
+                    session,
+                    "test_data_frames_finish",
+                    finish_start,
+                    success=True,
+                    test_data_dir=session.test_data_dir,
+                    test_data_frame_count=int(session.test_data_frame_count),
+                )
+                if not self._finalize_session_recording(session, "test_data_frames_completed"):
+                    return
+                self._log_final_response_ready(session)
+                self._mark_finished_event_set(session, "test_data_frames_completed")
+                return
 
             self._finalization_stage_begin(session, "postprocess", timed_out=bool(timed_out))
             roi4_validate_start = self._finalization_stage_begin(
@@ -3491,6 +3610,9 @@ class OfflineSessionManager:
                 "roi3_override_frame_index": session.roi3_override_frame_index,
                 "roi3_override_tag": session.roi3_override_tag,
             }
+            if session.save_test_data_frames:
+                session.response["test_data_dir"] = session.test_data_dir
+                session.response["test_data_frame_count"] = int(session.test_data_frame_count)
             session.response.update(build_roi4_diagnostics(session))
             session.response.update(result_paths)
             if session.debug_dir is not None:

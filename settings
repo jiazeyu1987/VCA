@@ -15,6 +15,9 @@
   "_comment_provider_ultrasound_depth_cache_path": "Runtime cache for the last valid provider raw depth value (ONLINE Depth). Do not store focus_depth/SkinDepth here.",
   "provider_ultrasound_depth_cache_path": "D:/software_data/provider_ultrasound_depth_cache.json",
 
+  "_comment_test_data_output_dir": "VeinTreat algorithm screenshot button output. Frames are saved as yyyyMMddHHmmss/001.png, 002.png, ... when save_test_data_frames=true.",
+  "test_data_output_dir": "D:/software_data/test_data",
+
   "_comment_roi1_capture": "Optional: capture a smaller ROI1 region instead of full screen to reduce screenshot/convert overhead.",
   "roi1_capture": {
     "enabled": false,

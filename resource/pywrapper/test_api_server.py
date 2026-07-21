@@ -547,6 +547,7 @@ class ApiServerTests(unittest.TestCase):
                 "offline_tmp_frames": {"enabled": True, "dir": "D:/software_data/tmp"},
                 "offline_stop_wait_timeout_seconds": 8.0,
                 "provider_ultrasound_depth_cache_path": "D:/software_data/custom_depth_cache.json",
+                "test_data_output_dir": "D:/software_data/custom_test_data",
                 "focus_guides": {"angle_degrees": 88.0, "line_width": 5, "y_offset_mm": 2.5},
             },
             self.make_null_logger("test_parse_offline_config_reads_roi_and_debug_settings"),
@@ -573,6 +574,7 @@ class ApiServerTests(unittest.TestCase):
         self.assertEqual(config.debug_save_dir, "D:/software_data/tmp")
         self.assertEqual(config.stop_wait_timeout_seconds, 8.0)
         self.assertEqual(config.provider_ultrasound_depth_cache_path, "D:/software_data/custom_depth_cache.json")
+        self.assertEqual(config.test_data_output_dir, "D:/software_data/custom_test_data")
         self.assertTrue(config.screenshot_test_enabled)
         self.assertEqual(config.focus_guide_angle_degrees, 88.0)
         self.assertEqual(config.focus_guide_line_width, 5)
@@ -791,6 +793,58 @@ class ApiServerTests(unittest.TestCase):
             manager.handle('{"point_id": 123, "time_out": 10}'),
             {"success": False, "info": "missing_is_save", "point_id": 123},
         )
+
+    def test_offline_save_test_data_frames_writes_timestamped_png_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource([
+                api_server.FrameSnapshot(np.full((80, 80, 3), 10, dtype=np.uint8), 1, 1.0),
+                api_server.FrameSnapshot(np.full((80, 80, 3), 20, dtype=np.uint8), 2, 2.0),
+                api_server.FrameSnapshot(np.full((80, 80, 3), 30, dtype=np.uint8), 3, 3.0),
+            ])
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(40, 40)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    offline_peak_after_delay_frames=2,
+                    offline_peak_end_diff_threshold=7.0,
+                    roi2_extension_params={"left": 4, "right": 4, "top": 4, "bottom": 4},
+                    roi3_extension_params={"left": 4, "right": 4, "top": 4, "bottom": 4},
+                    difference_threshold=5.0,
+                    image_output_dir=None,
+                    test_data_output_dir=tmp,
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger("test_offline_save_test_data_frames_writes_timestamped_png_sequence"),
+            )
+
+            start = manager.handle(
+                '{"point_id": "algorithm_screenshot_1", "time_out": 10, '
+                '"is_save": false, "save_test_data_frames": true}'
+            )
+            time.sleep(0.08)
+            stop = manager.handle(
+                '{"point_id": "algorithm_screenshot_1", "time_out": 10, '
+                '"is_save": false, "save_test_data_frames": true}'
+            )
+
+            self.assertEqual(start["info"], "offline_started")
+            self.assertTrue(stop["success"])
+            self.assertTrue(stop["capture_only"])
+            self.assertTrue(stop["save_test_data_frames"])
+            self.assertNotIn("roi2_color", stop)
+            session_dirs = [path for path in Path(tmp).iterdir() if path.is_dir()]
+            self.assertEqual(1, len(session_dirs))
+            self.assertRegex(session_dirs[0].name, r"^\d{14}$")
+            saved_frames = sorted(session_dirs[0].glob("*.png"))
+            self.assertEqual(["001.png", "002.png", "003.png"], [path.name for path in saved_frames])
+            self.assertEqual(stop["test_data_dir"], str(session_dirs[0]))
+            self.assertEqual(stop["test_data_frame_count"], 3)
+            self.assertEqual(int(np.array(api_server.Image.open(saved_frames[0]))[0, 0, 0]), 10)
+            self.assertEqual(int(np.array(api_server.Image.open(saved_frames[1]))[0, 0, 0]), 20)
+            self.assertEqual(int(np.array(api_server.Image.open(saved_frames[2]))[0, 0, 0]), 30)
 
     def test_offline_start_fails_without_device_frame(self):
         manager = api_server.OfflineSessionManager(
@@ -1758,10 +1812,19 @@ class ApiServerTests(unittest.TestCase):
         manager._active_session = previous
         called = {}
 
-        def fake_start(point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns):
+        def fake_start(
+                point_id,
+                duration_s,
+                is_save,
+                received_wall_time,
+                received_ts,
+                received_perf_counter_ns,
+                save_test_data_frames=False,
+                wait_before_capture=False):
             called["point_id"] = point_id
             called["duration_s"] = duration_s
             called["is_save"] = is_save
+            called["save_test_data_frames"] = save_test_data_frames
             called["received_wall_time_is_set"] = bool(received_wall_time)
             called["received_ts_type"] = type(received_ts).__name__
             called["received_perf_counter_ns_type"] = type(received_perf_counter_ns).__name__
@@ -1780,6 +1843,7 @@ class ApiServerTests(unittest.TestCase):
                 "point_id": 222,
                 "duration_s": 5.0,
                 "is_save": False,
+                "save_test_data_frames": False,
                 "received_wall_time_is_set": True,
                 "received_ts_type": "float",
                 "received_perf_counter_ns_type": "int",
