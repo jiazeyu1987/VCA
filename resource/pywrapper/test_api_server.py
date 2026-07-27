@@ -1981,6 +1981,13 @@ class ApiServerTests(unittest.TestCase):
             self.assertTrue(any('"event": "after_saved"' in line for line in meta_lines))
             self.assertTrue(list(debug_dir.glob("selected_before_00001_*.png")))
             self.assertTrue(list(debug_dir.glob("selected_before_plus_offset_00004_*.png")))
+            before_focus = json.loads((debug_dir / "before_focus.json").read_text(encoding="utf-8"))
+            self.assertEqual(before_focus["point_id"], 123)
+            self.assertEqual(before_focus["before_name"], api_server.format_frame_timestamp(1.0))
+            self.assertEqual(before_focus["before_frame_seq"], 1)
+            self.assertEqual(before_focus["before_frame_ts"], 1.0)
+            self.assertEqual(before_focus["provider_focus_point"], "PointF(20, 20)")
+            self.assertEqual(before_focus["focus_anchor"], [20, 20])
 
     def test_offline_session_recorder_receives_start_frames_stop_result_and_finish(self):
         frames = self.SequenceFrameSource(
@@ -2881,6 +2888,7 @@ class ApiServerTests(unittest.TestCase):
                 "after_roi1.png",
                 "after_roi2.png",
                 "after_roi3.png",
+                "before_focus.json",
                 "meta.json",
             ):
                 self.assertTrue((debug_dir / name).exists(), name)
@@ -2890,6 +2898,13 @@ class ApiServerTests(unittest.TestCase):
             self.assertEqual(meta["roi2_rect"], [8, 7, 12, 13])
             self.assertEqual(meta["roi3_rect"], [6, 5, 14, 15])
             self.assertEqual(meta["result"]["roi2_color"], "green")
+            before_focus = json.loads((debug_dir / "before_focus.json").read_text(encoding="utf-8"))
+            self.assertEqual(before_focus["point_id"], 123)
+            self.assertEqual(before_focus["before_name"], api_server.format_frame_timestamp(1.0))
+            self.assertEqual(before_focus["before_frame_seq"], 1)
+            self.assertEqual(before_focus["before_frame_ts"], 1.0)
+            self.assertEqual(before_focus["provider_focus_point"], "PointF(10, 10)")
+            self.assertEqual(before_focus["focus_anchor"], [10, 10])
 
     def test_offline_debug_disabled_does_not_create_debug_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

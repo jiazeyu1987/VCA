@@ -410,6 +410,44 @@ class SessionTimelineAnalyzerTests(unittest.TestCase):
             finally:
                 package.close()
 
+    def test_load_session_package_parses_focus_anchor_target_coordinate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp) / "session_target"
+            package_dir.mkdir()
+            create_sample_package_directory(package_dir)
+            (package_dir / "results").mkdir()
+            (package_dir / "results" / "offline_result.json").write_text(
+                json.dumps({"focus_anchor": [2, 1], "point_id": 123}),
+                encoding="utf-8",
+            )
+
+            package = analyzer.load_session_package(package_dir)
+
+            try:
+                self.assertIsNotNone(package.target_coordinate)
+                self.assertEqual((package.target_coordinate.x, package.target_coordinate.y), (2, 1))
+                self.assertEqual(package.target_coordinate.source, "results/offline_result.json:focus_anchor")
+            finally:
+                package.close()
+
+    def test_render_target_coordinate_overlay_draws_small_translucent_cross_only(self):
+        preview = Image.new("RGB", (100, 80), (0, 0, 0))
+        target = analyzer.TargetCoordinate(x=40, y=20, source="test")
+
+        rendered = analyzer.render_target_coordinate_overlay(preview, target, original_size=(200, 160))
+
+        self.assertEqual(preview.getpixel((20, 10)), (0, 0, 0))
+        self.assertNotEqual(rendered.getpixel((20, 10)), (0, 0, 0))
+        self.assertNotEqual(rendered.getpixel((20, 10)), analyzer.TARGET_MARKER_COLOR)
+        self.assertEqual(rendered.getpixel((10, 10)), (0, 0, 0))
+
+    def test_render_target_coordinate_overlay_skips_missing_coordinate(self):
+        preview = Image.new("RGB", (100, 80), (0, 0, 0))
+
+        rendered = analyzer.render_target_coordinate_overlay(preview, None, original_size=(100, 80))
+
+        self.assertEqual(rendered.tobytes(), preview.tobytes())
+
     def test_selecting_online_event_uses_nearest_previous_frame(self):
         with tempfile.TemporaryDirectory() as tmp:
             package_path = Path(tmp) / "session_sample.zip"

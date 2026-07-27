@@ -14,7 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 
 APP_TITLE = "Session Timeline Analyzer"
@@ -32,10 +32,23 @@ EVENT_COLORS = {
     "offline_end": "#b91c1c",
     "package_finalized": "#525252",
 }
+TARGET_MARKER_COLOR = (255, 214, 0)
+TARGET_MARKER_ALPHA = 160
 
 
 class SessionPackageError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class TargetCoordinate:
+    x: int
+    y: int
+    source: str
+
+    @property
+    def label(self) -> str:
+        return f"target ({self.x}, {self.y})"
 
 
 @dataclass(frozen=True)
@@ -143,6 +156,7 @@ class SessionPackage:
     package_path: Path
     manifest: dict
     events: list[TimelineEvent]
+    target_coordinate: TargetCoordinate | None = None
 
     @property
     def start_ns(self) -> int:
@@ -532,10 +546,54 @@ def load_session_package(path: str | Path) -> SessionPackage:
         events = parse_events(events_text)
         if not events:
             raise SessionPackageError("events.jsonl contains no events")
-        return SessionPackage(source=source, package_path=package_path, manifest=manifest, events=events)
+        target_coordinate = load_target_coordinate(source, manifest, package_path)
+        return SessionPackage(
+            source=source,
+            package_path=package_path,
+            manifest=manifest,
+            events=events,
+            target_coordinate=target_coordinate,
+        )
     except Exception:
         source.close()
         raise
+
+
+def load_target_coordinate(source: PackageSource, manifest: dict, package_path: Path) -> TargetCoordinate | None:
+    if source.exists("results/offline_result.json"):
+        try:
+            result = json.loads(source.read_text("results/offline_result.json"))
+        except json.JSONDecodeError as exc:
+            raise SessionPackageError(f"{package_path} results/offline_result.json is invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise SessionPackageError(f"{package_path} results/offline_result.json must be a JSON object")
+        if result.get("focus_anchor") is not None:
+            return parse_target_coordinate(
+                result.get("focus_anchor"),
+                source="results/offline_result.json:focus_anchor",
+                package_path=package_path,
+            )
+    meta = manifest.get("meta")
+    if isinstance(meta, dict) and meta.get("focus_anchor") is not None:
+        return parse_target_coordinate(
+            meta.get("focus_anchor"),
+            source="manifest.json:meta.focus_anchor",
+            package_path=package_path,
+        )
+    return None
+
+
+def parse_target_coordinate(value, source: str, package_path: Path) -> TargetCoordinate:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise SessionPackageError(f"{package_path} {source} must contain two numeric coordinates")
+    try:
+        x = int(round(float(value[0])))
+        y = int(round(float(value[1])))
+    except Exception as exc:
+        raise SessionPackageError(f"{package_path} {source} must contain two numeric coordinates") from exc
+    if x < 0 or y < 0:
+        raise SessionPackageError(f"{package_path} {source} coordinates must be non-negative")
+    return TargetCoordinate(x=x, y=y, source=source)
 
 
 def parse_events(text: str) -> list[TimelineEvent]:
@@ -567,6 +625,40 @@ def parse_events(text: str) -> list[TimelineEvent]:
             )
         )
     return sorted(events, key=lambda event: (event.perf_counter_ns, event.index))
+
+
+def render_target_coordinate_overlay(
+    preview: Image.Image,
+    target_coordinate: TargetCoordinate | None,
+    original_size: tuple[int, int],
+) -> Image.Image:
+    if target_coordinate is None:
+        return preview
+    original_width, original_height = [int(value) for value in original_size]
+    if original_width <= 0 or original_height <= 0:
+        raise SessionPackageError(f"invalid image size for target overlay: {original_size}")
+    if target_coordinate.x >= original_width or target_coordinate.y >= original_height:
+        raise SessionPackageError(
+            f"target coordinate outside image bounds: "
+            f"target=({target_coordinate.x}, {target_coordinate.y}) size={original_size}"
+        )
+    rendered = preview.convert("RGBA")
+    preview_width, preview_height = rendered.size
+    if preview_width <= 0 or preview_height <= 0:
+        raise SessionPackageError(f"invalid preview size for target overlay: {rendered.size}")
+    x = int(round(target_coordinate.x * preview_width / original_width))
+    y = int(round(target_coordinate.y * preview_height / original_height))
+    x = min(preview_width - 1, max(0, x))
+    y = min(preview_height - 1, max(0, y))
+    radius = max(5, int(round(min(preview_width, preview_height) * 0.012)))
+    line_width = max(1, int(round(min(preview_width, preview_height) * 0.0035)))
+    overlay = Image.new("RGBA", rendered.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    marker_color = (*TARGET_MARKER_COLOR, TARGET_MARKER_ALPHA)
+    draw.line((x - radius, y, x + radius, y), fill=marker_color, width=line_width)
+    draw.line((x, y - radius, x, y + radius), fill=marker_color, width=line_width)
+    rendered.alpha_composite(overlay)
+    return rendered.convert(preview.mode)
 
 
 class SessionTimelineAnalyzerApp:
@@ -1019,9 +1111,17 @@ class SessionTimelineAnalyzerApp:
         self.viewport.zoom_at(x_fraction, factor)
         self.draw_timeline()
 
+    def _current_target_coordinate(self) -> TargetCoordinate | None:
+        package = getattr(self, "package", None)
+        if package is None:
+            return None
+        return package.target_coordinate
+
     def show_image(self, image: Image.Image, image_event: TimelineEvent, selected_event: TimelineEvent) -> None:
+        original_size = image.size
         preview = image.copy()
         preview.thumbnail(PREVIEW_MAX_SIZE)
+        preview = render_target_coordinate_overlay(preview, self._current_target_coordinate(), original_size)
         self.photo = ImageTk.PhotoImage(preview)
         self.preview_label.configure(image=self.photo)
         suffix = "" if image_event == selected_event else f" via {image_event.event_type}"

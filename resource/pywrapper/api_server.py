@@ -182,6 +182,10 @@ class OfflineSession:
     before_seq: Optional[int] = None
     before_ts: Optional[float] = None
     before_name: str = ""
+    before_focus_anchor: Optional[Tuple[int, int]] = None
+    before_provider_focus_point: Optional[str] = None
+    before_focus_frame_seq: Optional[int] = None
+    before_focus_frame_ts: Optional[float] = None
     after: Optional[np.ndarray] = None
     after_seq: Optional[int] = None
     after_ts: Optional[float] = None
@@ -2285,6 +2289,7 @@ class OfflineSessionManager:
         session.before_name = format_frame_timestamp(record.ts)
         if session.roi2_rect is None:
             self._initialize_focus_and_rois(session, session.before)
+        self._snapshot_before_focus(session)
         session.before_mean = roi_gray_mean(session.before, session.roi2_rect) if session.roi2_rect is not None else None
         self._offline_diag(
             "before_selected",
@@ -2298,6 +2303,17 @@ class OfflineSessionManager:
             roi1_gray=round(float(record.roi1_gray), 6),
             roi2_before_mean=round(float(session.before_mean), 6) if session.before_mean is not None else None,
         )
+
+    def _snapshot_before_focus(self, session: OfflineSession) -> None:
+        session.before_focus_anchor = (
+            (int(session.focus_anchor[0]), int(session.focus_anchor[1]))
+            if session.focus_anchor is not None
+            else None
+        )
+        provider_focus_point = session.meta.get("provider_focus_point")
+        session.before_provider_focus_point = str(provider_focus_point) if provider_focus_point is not None else None
+        session.before_focus_frame_seq = int(session.before_seq) if session.before_seq is not None else None
+        session.before_focus_frame_ts = float(session.before_ts) if session.before_ts is not None else None
 
     def _select_after_record_for_roi2(self, session: OfflineSession, record: OfflineFrameRecord, reason: str) -> None:
         session.after = np.array(record.frame, copy=True)
@@ -2669,6 +2685,7 @@ class OfflineSessionManager:
             session.before_seq = int(baseline.seq)
             session.before_ts = float(baseline.ts)
             session.before_name = format_frame_timestamp(baseline.ts)
+            self._snapshot_before_focus(session)
             session.after = np.array(selected_record.frame, copy=True)
             session.after_seq = int(selected_record.seq)
             session.after_ts = float(selected_record.ts)
@@ -2866,11 +2883,28 @@ class OfflineSessionManager:
         meta["roi2_rect"] = [int(v) for v in session.roi2_rect] if session.roi2_rect is not None else None
         meta["roi3_rect"] = [int(v) for v in session.roi3_rect] if session.roi3_rect is not None else None
         meta.update(build_roi4_diagnostics(session))
-        if session.before is not None and session.roi2_rect is not None and session.roi3_rect is not None:
-            self._debug_saver.save_stage(session.debug_dir, "before", session.before, session.roi2_rect, session.roi3_rect)
+        if session.before is not None:
             before_source_name = self._find_buffered_frame_name(session, session.before_seq, session.before_ts)
             write_png(Path(session.debug_dir) / "final_before.png", session.before)
             write_png(Path(session.debug_dir) / format_final_debug_frame_name("before", before_source_name), session.before)
+            before_focus = {
+                "point_id": session.point_id,
+                "before_name": session.before_name,
+                "before_frame_seq": session.before_focus_frame_seq,
+                "before_frame_ts": session.before_focus_frame_ts,
+                "provider_focus_point": session.before_provider_focus_point,
+                "focus_anchor": (
+                    [int(session.before_focus_anchor[0]), int(session.before_focus_anchor[1])]
+                    if session.before_focus_anchor is not None
+                    else None
+                ),
+            }
+            (Path(session.debug_dir) / "before_focus.json").write_text(
+                json.dumps(before_focus, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            if session.roi2_rect is not None and session.roi3_rect is not None:
+                self._debug_saver.save_stage(session.debug_dir, "before", session.before, session.roi2_rect, session.roi3_rect)
         if session.after is not None and session.roi2_rect is not None and session.roi3_rect is not None:
             self._debug_saver.save_stage(session.debug_dir, "after", session.after, session.roi2_rect, session.roi3_rect)
             after_source_name = self._find_buffered_frame_name(session, session.after_seq, session.after_ts)
@@ -3230,6 +3264,7 @@ class OfflineSessionManager:
                     session.before_name = format_frame_timestamp(frame.ts)
                     before_gray_mean = float(roi1_gray)
                     self._initialize_focus_and_rois(session, frame_image)
+                    self._snapshot_before_focus(session)
                     if session.roi2_rect is not None:
                         session.before_mean = roi_gray_mean(frame_image, session.roi2_rect)
                     self._log_first_screenshot_timing(session, frame, frame_index, roi1_gray)
@@ -3272,6 +3307,7 @@ class OfflineSessionManager:
                 session.before_seq = before_default_seq
                 session.before_ts = before_default_ts
                 session.before_name = format_frame_timestamp(before_default_ts) if before_default_ts is not None else ""
+                self._snapshot_before_focus(session)
             if self._config.offline_peak_enabled and before_gray_mean is not None and pending_error_response is None:
                 try:
                     self._apply_roi4_after_selector_if_needed(session, require_fallback_after=False)
