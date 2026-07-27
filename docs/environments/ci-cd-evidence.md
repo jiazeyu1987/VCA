@@ -6,6 +6,7 @@
 - Release repository: `D:\ocr3\VA`
 - Published runtime package source: `D:\ocr3\dist\OCRSERVER`
 - Analyzer release artifact: `session_timeline_analyzer.exe`
+- Required release Python: `D:\miniconda3\envs\houyang\python.exe`
 
 ## Commands
 
@@ -23,6 +24,7 @@
 
 - `publish_release.bat` calls `tools\publish_release.ps1`.
 - `tools\publish_release.ps1` stops the server, builds OCRSERVER, builds `session_timeline_analyzer.exe`, copies it into `dist\OCRSERVER`, syncs `dist\OCRSERVER` into `VA`, stages all release changes, commits only when Git detects changes, and pushes `VA` to `origin/main`.
+- Preflight must verify `D:\miniconda3\envs\houyang\python.exe` exists before running `publish_release.bat`; the package scripts intentionally fail fast on that exact missing runtime instead of falling back to another Python.
 
 ## Verification
 
@@ -42,4 +44,4 @@
 
 ## Blockers
 
-- None currently.
+- 2026-07-27: `publish_release.bat` is blocked on this machine because `D:\miniconda3\envs\houyang\python.exe` is missing.
