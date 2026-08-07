@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $packageRoot = "D:\ocr3"
 $packageScript = Join-Path $packageRoot "package_pywrapper_server.bat"
 $timelineAnalyzerPackageScript = Join-Path $packageRoot "package_session_timeline_analyzer.bat"
+$packagePowerShellScript = Join-Path $packageRoot "tools\package_pywrapper_server.ps1"
+$timelineAnalyzerPowerShellScript = Join-Path $packageRoot "tools\package_session_timeline_analyzer.ps1"
 $stopScript = Join-Path $packageRoot "closeserver.bat"
 $releaseSourceDir = Join-Path $packageRoot "dist\OCRSERVER"
 $timelineAnalyzerExe = Join-Path $packageRoot "dist\session_timeline_analyzer.exe"
@@ -21,6 +23,12 @@ if (-not (Test-Path $packageScript)) {
 }
 if (-not (Test-Path $timelineAnalyzerPackageScript)) {
     throw "Session timeline analyzer package script not found: $timelineAnalyzerPackageScript"
+}
+if (-not (Test-Path $packagePowerShellScript)) {
+    throw "Package PowerShell script not found: $packagePowerShellScript"
+}
+if (-not (Test-Path $timelineAnalyzerPowerShellScript)) {
+    throw "Session timeline analyzer PowerShell script not found: $timelineAnalyzerPowerShellScript"
 }
 if (-not (Test-Path $stopScript)) {
     throw "Stop script not found: $stopScript"
@@ -49,6 +57,9 @@ if ($LASTEXITCODE -ne 0) {
 if (-not [string]::IsNullOrWhiteSpace($dirty)) {
     throw "Release repo is not clean: $releaseRepo"
 }
+
+& $packagePowerShellScript -PreflightOnly
+& $timelineAnalyzerPowerShellScript -PreflightOnly
 
 & $stopScript
 if ($LASTEXITCODE -ne 0) {
@@ -105,7 +116,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "git commit failed for: $releaseRepo"
 }
 
-git -C $releaseRepo -c http.version=HTTP/1.1 -c http.proxy= -c https.proxy= push -u origin HEAD:main
+git -C $releaseRepo -c http.version=HTTP/1.1 -c http.proxy= -c https.proxy= -c http.https://github.com.proxy= push -u origin HEAD:main
 if ($LASTEXITCODE -ne 0) {
     throw "git push failed for: $releaseRepo"
 }

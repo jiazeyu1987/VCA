@@ -21,3 +21,13 @@
 - CLOSEOUT: `task_closeout.py --mode preview` matched the intended task scope; apply removed only the task review run and intermediate evidence while retaining task, execution, verification, production, and formal test files.
 - PUSH: implementation commit `b98dfbd` -> PASS to `origin/codex/offline-finalization-background-optimization`; the repository-specific GitHub proxy override was cleared for this command only.
 - BLOCKED: release preflight `Test-Path D:\miniconda3\envs\houyang\python.exe` -> `False`. `docs/environments/ci-cd-evidence.md` requires this exact runtime and prohibits fallback; `publish_release.bat` was not invoked because it would stop the server before packaging fails.
+- BDD: standalone Python release -> Given `PyMobileComm.pyd` depends on `python39.dll` and Conda is prohibited, When release packaging uses an installed standalone Python 3.9, Then required Python packages and the real-device extension load successfully before the server is stopped or artifacts are published.
+- RED: `D:\Python39\python.exe -B -m unittest test_server_scripts.ServerScriptTests.test_package_script_defaults_to_standalone_python39_runtime test_server_scripts.ServerScriptTests.test_timeline_package_script_uses_standalone_python_without_conda_dlls test_server_scripts.ServerScriptTests.test_publish_release_runs_python_preflight_before_stopping_server` -> FAIL (3 tests), expected reasons: both package scripts still require Conda and publish has no pre-stop runtime preflight.
+- GREEN: the same focused standalone-Python release tests -> PASS (3 tests).
+- GREEN: `D:\Python39\python.exe -B -m unittest test_server_scripts` from `resource\pywrapper` -> PASS (13 tests).
+- GREEN: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package_pywrapper_server.ps1 -PreflightOnly` -> PASS; standalone 64-bit Python 3.9, PyInstaller, Pillow, NumPy, and `PyMobileComm` loaded before server shutdown.
+- GREEN: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\package_session_timeline_analyzer.ps1 -PreflightOnly` -> PASS; standalone 64-bit Python 3.9, PyInstaller, Pillow, and Tkinter loaded before server shutdown.
+- GREEN: `D:\Python39\python.exe -B -m unittest test_session_recorder test_api_server` from `resource\pywrapper` -> PASS (129 tests).
+- GREEN: `D:\Python39\python.exe -B -m unittest test_server_scripts test_offline_screenshot_probe` from `resource\pywrapper` -> PASS (30 tests).
+- GREEN: PowerShell scriptblock parsing for both package scripts and `tools\publish_release.ps1` -> PASS.
+- GREEN: CI/CD environment evidence validator -> PASS.

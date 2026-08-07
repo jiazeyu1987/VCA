@@ -11,6 +11,7 @@ Remove previous-session debug image and session-package finalization from the ne
 - [x] Refactor OFFLINE session ownership and recording finalization so previous-session persistence does not block the next start.
 - [x] Verify result integrity, session-package integrity, failure behavior, and relevant regressions.
 - [ ] Complete independent review, cleanup, commit, push, release publish, and final push.
+- [x] Install standalone Python 3.9, remove Conda-only packaging assumptions, and verify real-device extension loading before publish.
 
 ## Expected Verification
 
@@ -22,11 +23,11 @@ Remove previous-session debug image and session-package finalization from the ne
 
 ## Current Status
 
-blocked
+in_progress
 
 ## Blockers
 
-- Release publish is blocked: required runtime `D:\miniconda3\envs\houyang\python.exe` is missing. The repository explicitly forbids substituting another Python runtime, and `publish_release.bat` would stop the service before the package script reports this failure.
+- Previous Conda-runtime blocker was explicitly superseded by user approval to install standalone Python 3.9 and use it for release.
 - Real-device timing remains blocked until the new hardware is connected.
 
 ## Completed Work
@@ -51,7 +52,11 @@ blocked
 - Final no-bytecode regression runs passed: 129 API/recorder tests and 28 server/probe tests.
 - Task closeout cleanup preview and apply passed with no blocked or ambiguous paths.
 - Implementation commit `b98dfbd` was pushed to `origin/codex/offline-finalization-background-optimization`.
-- Release preflight stopped before `publish_release.bat` because the required `houyang` runtime is missing; no service process or release repository was modified.
+- The former `houyang` Conda blocker was superseded by the approved standalone Python 3.9 installation.
+- Confirmed `PyMobileComm.pyd` imports `python39.dll`; Python 3.12/3.14 cannot preserve real-device support.
+- User explicitly prohibited Conda and authorized installation of standalone Python.
+- Installed official standalone 64-bit CPython 3.9.13 at `D:\Python39`, installed the required packaging dependencies, and loaded `PyMobileComm.pyd` successfully.
+- Added fail-fast server and analyzer packaging preflights before server shutdown; both preflights, 13 release-script tests, and 129 API/recorder tests pass under Python 3.9.
 
 ## Cleanup Candidates
 

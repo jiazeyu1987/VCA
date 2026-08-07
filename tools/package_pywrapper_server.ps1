@@ -1,3 +1,7 @@
+param(
+    [switch]$PreflightOnly
+)
+
 $ErrorActionPreference = "Stop"
 
 $packageRoot = "D:\ocr3"
@@ -24,7 +28,7 @@ $deployToVeinMain = $env:DEPLOY_TO_VEIN_MAIN
 $veinOcrServerDir = Join-Path $veinMainDir "OCRSERVER"
 
 if (-not $env:PYTHON_EXE -or [string]::IsNullOrWhiteSpace($env:PYTHON_EXE)) {
-    $env:PYTHON_EXE = "D:\miniconda3\envs\houyang\python.exe"
+    $env:PYTHON_EXE = "D:\Python39\python.exe"
 }
 $pythonExe = $env:PYTHON_EXE
 
@@ -77,27 +81,23 @@ foreach ($path in $releaseSupportFiles) {
     }
 }
 
-$pythonDir = Split-Path $pythonExe -Parent
-$condaBin = Join-Path $pythonDir "Library\bin"
-$requiredCondaFiles = @(
-    "ffi.dll",
-    "libbz2.dll",
-    "libcrypto-3-x64.dll",
-    "libexpat.dll",
-    "liblzma.dll",
-    "libssl-3-x64.dll",
-    "sqlite3.dll"
-)
-foreach ($name in $requiredCondaFiles) {
-    $path = Join-Path $condaBin $name
-    if (-not (Test-Path $path)) {
-        throw "Required conda runtime file not found: $path"
-    }
+if ($deployToVeinMain -eq "1" -and -not (Test-Path $veinMainDir)) {
+    throw "Main program directory not found: $veinMainDir"
 }
 
-& $pythonExe -c "import PyInstaller" | Out-Null
+& $pythonExe -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 9) and sys.maxsize > 2**32 else 1)" | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw "PyInstaller is not installed in $pythonExe"
+    throw "Standalone 64-bit Python 3.9 is required for PyMobileComm: $pythonExe"
+}
+
+& $pythonExe -c "import os, sys; runtime = sys.argv[1]; os.add_dll_directory(runtime); sys.path.insert(0, runtime); import PyInstaller, PIL, numpy, PyMobileComm" $runtimeRoot | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Required Python packages or PyMobileComm are unavailable in $pythonExe"
+}
+
+Write-Host "[OK] Server packaging preflight passed."
+if ($PreflightOnly) {
+    return
 }
 
 $workPath = Join-Path $artifactRoot ("build\" + $appName)
@@ -126,13 +126,6 @@ try {
         "--add-binary", "$runtimeRoot\DicomContol_Factory.dll;.",
         "--add-binary", "$runtimeRoot\Ijwhost.dll;.",
         "--add-binary", "$runtimeRoot\opencv_world440.dll;.",
-        "--add-binary", "$condaBin\ffi.dll;.",
-        "--add-binary", "$condaBin\libbz2.dll;.",
-        "--add-binary", "$condaBin\libcrypto-3-x64.dll;.",
-        "--add-binary", "$condaBin\libexpat.dll;.",
-        "--add-binary", "$condaBin\liblzma.dll;.",
-        "--add-binary", "$condaBin\libssl-3-x64.dll;.",
-        "--add-binary", "$condaBin\sqlite3.dll;.",
         "--add-data", "$runtimeRoot\Company.ini;.",
         "--add-data", "$runtimeRoot\license;.",
         "--add-data", "$settingsPath;.",
@@ -155,7 +148,6 @@ if (-not (Test-Path $exePath)) {
 foreach ($name in @("Company.ini", "AdbWinApi.dll", "AdbWinUsbApi.dll")) {
     Copy-Item -LiteralPath (Join-Path $runtimeRoot $name) -Destination (Join-Path $distDir $name) -Force
 }
-Copy-Item -LiteralPath (Join-Path $condaBin "sqlite3.dll") -Destination (Join-Path $distDir "sqlite3.dll") -Force
 Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $distDir "settings") -Force
 
 Write-Host "[OK] Server exe created:"
@@ -179,9 +171,6 @@ Write-Host "[OK] Main-program compatible server exe created:"
 Write-Host "     $compatExePath"
 
 if ($deployToVeinMain -eq "1") {
-    if (-not (Test-Path $veinMainDir)) {
-        throw "Main program directory not found: $veinMainDir"
-    }
     if (Test-Path $veinOcrServerDir) {
         Remove-Item -LiteralPath $veinOcrServerDir -Recurse -Force
     }

@@ -53,13 +53,27 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn('Join-Path $distDir "settings"', text)
         self.assertIn("Copy-Item -LiteralPath $settingsPath", text)
 
-    def test_package_script_defaults_to_existing_py39_runtime(self):
+    def test_package_script_defaults_to_standalone_python39_runtime(self):
         script_path = WORKSPACE_ROOT / "tools" / "package_pywrapper_server.ps1"
 
         self.assertTrue(script_path.exists(), script_path)
         text = script_path.read_text(encoding="utf-8")
-        self.assertIn(r"D:\miniconda3\envs\houyang\python.exe", text)
-        self.assertNotIn(r"D:\miniconda3\envs\py39\python.exe", text)
+        self.assertIn(r"D:\Python39\python.exe", text)
+        self.assertNotIn(r"Library\bin", text)
+        self.assertNotIn("Required conda runtime file", text)
+        self.assertIn("PyMobileComm", text)
+        self.assertIn("sys.version_info[:2]", text)
+        self.assertIn("[switch]$PreflightOnly", text)
+
+    def test_timeline_package_script_uses_standalone_python_without_conda_dlls(self):
+        script_path = WORKSPACE_ROOT / "tools" / "package_session_timeline_analyzer.ps1"
+
+        self.assertTrue(script_path.exists(), script_path)
+        text = script_path.read_text(encoding="utf-8")
+        self.assertIn(r"D:\Python39\python.exe", text)
+        self.assertNotIn(r"Library\bin", text)
+        self.assertNotIn("Required conda runtime file", text)
+        self.assertIn("[switch]$PreflightOnly", text)
 
     def test_package_script_copies_release_files_into_ocrserver(self):
         script_path = WORKSPACE_ROOT / "tools" / "package_pywrapper_server.ps1"
@@ -107,6 +121,19 @@ class ServerScriptTests(unittest.TestCase):
         self.assertIn(stop_call, text)
         self.assertLess(text.index(stop_call), text.index(package_call))
         self.assertIn("Stop script failed with exit code", text)
+
+    def test_publish_release_runs_python_preflight_before_stopping_server(self):
+        script_path = WORKSPACE_ROOT / "tools" / "publish_release.ps1"
+
+        self.assertTrue(script_path.exists(), script_path)
+        text = script_path.read_text(encoding="utf-8")
+        preflight_call = "& $packagePowerShellScript -PreflightOnly"
+        analyzer_preflight_call = "& $timelineAnalyzerPowerShellScript -PreflightOnly"
+        stop_call = "& $stopScript"
+        self.assertIn(preflight_call, text)
+        self.assertIn(analyzer_preflight_call, text)
+        self.assertLess(text.index(preflight_call), text.index(stop_call))
+        self.assertLess(text.index(analyzer_preflight_call), text.index(stop_call))
 
     def test_publish_release_packages_timeline_analyzer_into_va_release_source(self):
         script_path = WORKSPACE_ROOT / "tools" / "publish_release.ps1"

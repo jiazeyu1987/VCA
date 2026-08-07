@@ -1,3 +1,7 @@
+param(
+    [switch]$PreflightOnly
+)
+
 $ErrorActionPreference = "Stop"
 
 $packageRoot = "D:\ocr3"
@@ -9,7 +13,7 @@ $distRoot = Join-Path $artifactRoot "dist"
 $exePath = Join-Path $distRoot "session_timeline_analyzer.exe"
 
 if (-not $env:PYTHON_EXE -or [string]::IsNullOrWhiteSpace($env:PYTHON_EXE)) {
-    $env:PYTHON_EXE = "D:\miniconda3\envs\houyang\python.exe"
+    $env:PYTHON_EXE = "D:\Python39\python.exe"
 }
 $pythonExe = $env:PYTHON_EXE
 
@@ -25,29 +29,19 @@ if (-not (Test-Path $entry)) {
     throw "Entry script not found: $entry"
 }
 
-$pythonDir = Split-Path $pythonExe -Parent
-$condaBin = Join-Path $pythonDir "Library\bin"
-$requiredCondaFiles = @(
-    "ffi.dll",
-    "libbz2.dll",
-    "libcrypto-3-x64.dll",
-    "libexpat.dll",
-    "liblzma.dll",
-    "libssl-3-x64.dll",
-    "sqlite3.dll",
-    "tcl86t.dll",
-    "tk86t.dll"
-)
-foreach ($name in $requiredCondaFiles) {
-    $path = Join-Path $condaBin $name
-    if (-not (Test-Path $path)) {
-        throw "Required conda runtime file not found: $path"
-    }
+& $pythonExe -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 9) and sys.maxsize > 2**32 else 1)" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Standalone 64-bit Python 3.9 is required: $pythonExe"
 }
 
 & $pythonExe -c "import PyInstaller, PIL, tkinter" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Required Python packages are missing in $pythonExe. Required imports: PyInstaller, PIL, tkinter"
+}
+
+Write-Host "[OK] Session timeline analyzer packaging preflight passed."
+if ($PreflightOnly) {
+    return
 }
 
 $workPath = Join-Path $artifactRoot ("build\" + $appName)
@@ -70,15 +64,6 @@ try {
         "--distpath", $distRoot,
         "--workpath", $workPath,
         "--specpath", $specPath,
-        "--add-binary", "$condaBin\ffi.dll;.",
-        "--add-binary", "$condaBin\libbz2.dll;.",
-        "--add-binary", "$condaBin\libcrypto-3-x64.dll;.",
-        "--add-binary", "$condaBin\libexpat.dll;.",
-        "--add-binary", "$condaBin\liblzma.dll;.",
-        "--add-binary", "$condaBin\libssl-3-x64.dll;.",
-        "--add-binary", "$condaBin\sqlite3.dll;.",
-        "--add-binary", "$condaBin\tcl86t.dll;.",
-        "--add-binary", "$condaBin\tk86t.dll;.",
         $entry
     )
     & $pythonExe @args
