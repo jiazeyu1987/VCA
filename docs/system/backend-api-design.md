@@ -37,16 +37,16 @@ Existing module integration:
   - Pass recorder into `OfflineSessionManager` and `ApiServer`.
   - Call recorder on OFFLINE start, frame capture, stop request, final result, and online request completion.
 
-Recommended lifecycle calls:
+Lifecycle calls use the explicit recorder session ID returned by `start_session`:
 
 ```python
-recorder.start_session(point_id=point_id, meta=...)
-recorder.mark_offline_start(...)
-recorder.record_frame(frame, frame_seq=..., frame_ts=..., source="offline_capture", tag=...)
-recorder.mark_offline_stop_requested(...)
+session_id = recorder.start_session(point_id=point_id, meta=...)
+recorder.record_frame(frame, frame_seq=..., frame_ts=..., source="offline_capture", tag=..., session_id=session_id)
+recorder.mark_offline_stop_requested(session_id=session_id)
 recorder.record_online_request(trace_id=..., started_ns=..., ended_ns=..., response_summary=...)
-recorder.record_offline_result(session.response, result_paths=...)
-recorder.finish_session(...)
+recorder.detach_session(session_id=session_id)
+recorder.record_offline_result(session.response, session_id=session_id)
+recorder.finish_session(session_id=session_id)
 ```
 
 The algorithm server should only pass events and images. It should not know package file names, trace formatting details, or zip internals.
@@ -86,11 +86,21 @@ The first implementation should not add compatibility aliases. Missing or invali
 
 Recorder session contract:
 
-- One active recorder session maps to one accepted OFFLINE point session.
+- One capture-active recorder session maps to the current accepted OFFLINE point session.
+- A detached previous session may finalize concurrently with the current capture-active session.
+- Every frame, stop, result, detach, and finish operation is routed by explicit `session_id`; finalizers must never resolve an implicit "last active" session.
 - `session_id` format: `YYYYMMDD_HHMMSS_mmm_point_<point_id>_<short_random>`.
 - The recorder writes to a temporary directory first: `<output_dir>/<session_id>.partial/`.
 - Final package path: `<output_dir>/<session_id>.zip`.
 - On successful finalization, the `.partial` directory may be removed only after the zip file is fully written and verified.
+
+Consecutive-treatment ordering:
+
+- Treatment calculation and shared final outputs (final images, result flag, and database state) complete before handoff.
+- After shared outputs complete, the old recorder session is detached and `handoff_ready` is signaled.
+- The next treatment may capture after handoff without waiting for old session-specific debug PNG and zip persistence.
+- Completion of an old finalizer may clear only its own recorder entry; identity checks must preserve the current active session.
+- Shutdown rejects new OFFLINE starts and drains every tracked capture or detached finalizer. Timeout or persistence failure remains a process-visible error.
 
 ## Error Model
 
@@ -128,6 +138,13 @@ Idempotency:
 - Repeated `finish_session` calls after success should return the same package path.
 - Repeated `finish_session` after failure should raise the stored failure until a new session starts.
 - Extra OFFLINE requests already return `offline_ignored_extra_request`; recorder should not create additional packages for ignored requests.
+
+## Durable Concurrency Rules
+
+- Do not shorten latency by moving shared result writes behind the handoff boundary; older treatments could overwrite newer shared state.
+- Do not use a generic capture-loop event as the handoff signal while fallback frame reads or shared post-processing can still occur.
+- Do not release only the manager lock while keeping singleton recorder ownership; overlapping sessions would reject or misroute data.
+- Regression tests must block shared outputs and unique persistence separately, then inspect both zip manifests, results, and decoded frame pixels for cross-session contamination.
 
 ## Open Questions
 

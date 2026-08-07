@@ -141,9 +141,8 @@ class SessionDataRecorder:
         self._logger = logger or logging.getLogger("pywrapper_api_server")
         self._id_factory = id_factory or default_session_id
         self._lock = threading.Lock()
-        self._active_session: Optional[RecordingSession] = None
-        self._last_completed_package_path: Optional[Path] = None
-        self._last_failure: Optional[BaseException] = None
+        self._sessions: dict[str, RecordingSession] = {}
+        self._active_session_id: Optional[str] = None
         self._logger.info(
             "SESSION_RECORDING config_loaded: %s",
             json.dumps(self._config.sanitized(), ensure_ascii=False, sort_keys=True),
@@ -155,16 +154,19 @@ class SessionDataRecorder:
 
     def is_active(self) -> bool:
         with self._lock:
-            session = self._active_session
+            session = self._sessions.get(self._active_session_id) if self._active_session_id is not None else None
             return bool(self._config.enabled and session is not None and session.state in {"active", "stopping"})
 
     def start_session(self, point_id, meta: Optional[dict] = None, server: Optional[dict] = None) -> Optional[str]:
         if not self._config.enabled:
             return None
         with self._lock:
-            if self._active_session is not None and self._active_session.state in {"active", "stopping", "finalizing"}:
+            active = self._sessions.get(self._active_session_id) if self._active_session_id is not None else None
+            if active is not None and active.state in {"active", "stopping"}:
                 raise RuntimeError("session recording already active")
             session_id = self._id_factory(point_id)
+            if session_id in self._sessions:
+                raise RuntimeError(f"session recording id already exists: {session_id}")
             output_dir = Path(str(self._config.output_dir))
             output_dir.mkdir(parents=True, exist_ok=True)
             package_stem = f"session_{session_id}"
@@ -198,8 +200,8 @@ class SessionDataRecorder:
                 name=f"session-recorder-{session_id}",
             )
             session.writer_thread.start()
-            self._active_session = session
-            self._last_failure = None
+            self._sessions[session_id] = session
+            self._active_session_id = session_id
 
         self._append_event(
             session,
@@ -216,10 +218,11 @@ class SessionDataRecorder:
         )
         return session.session_id
 
-    def mark_offline_stop_requested(self, **fields) -> None:
-        session = self._require_active_session()
+    def mark_offline_stop_requested(self, session_id: str, **fields) -> None:
+        session = self._require_session(session_id, {"active"})
         self._raise_if_failed(session)
-        session.state = "stopping"
+        with self._lock:
+            session.state = "stopping"
         epoch_ms, perf_counter_ns, _ = current_time_fields()
         session.offline_stop_requested_epoch_ms = epoch_ms
         session.offline_stop_requested_perf_counter_ns = perf_counter_ns
@@ -239,8 +242,10 @@ class SessionDataRecorder:
         source: str,
         tag: str,
         metrics: Optional[dict] = None,
+        *,
+        session_id: str,
     ) -> None:
-        session = self._require_active_session()
+        session = self._require_session(session_id, {"active", "stopping"})
         self._raise_if_failed(session)
         image_copy = np.array(image, copy=True)
         with session.lock:
@@ -324,8 +329,8 @@ class SessionDataRecorder:
 
         self._enqueue(session, op)
 
-    def record_offline_result(self, result_summary: dict) -> None:
-        session = self._require_active_or_stopping_session()
+    def record_offline_result(self, result_summary: dict, *, session_id: str) -> None:
+        session = self._require_session(session_id, {"active", "stopping", "detached", "finalizing"})
         self._raise_if_failed(session)
         result_payload = json_safe(dict(result_summary or {}))
         with session.lock:
@@ -344,19 +349,39 @@ class SessionDataRecorder:
 
         self._enqueue(session, op)
 
-    def finish_session(self) -> Optional[Path]:
+    def detach_session(self, *, session_id: str) -> None:
+        if not self._config.enabled:
+            return
+        with self._lock:
+            session = self._sessions.get(str(session_id))
+            if session is None:
+                raise RuntimeError(f"unknown session recording id: {session_id}")
+            if session.state not in {"active", "stopping"}:
+                raise RuntimeError(
+                    f"session recording cannot detach from state {session.state}: {session_id}"
+                )
+            session.state = "detached"
+            if self._active_session_id == session.session_id:
+                self._active_session_id = None
+        self._logger.info(
+            "SESSION_RECORDING session_detached: session_id=%s point_id=%s",
+            session.session_id,
+            session.point_id,
+        )
+
+    def finish_session(self, *, session_id: str) -> Optional[Path]:
         if not self._config.enabled:
             return None
         with self._lock:
-            session = self._active_session
+            session = self._sessions.get(str(session_id))
             if session is None:
-                if self._last_completed_package_path is not None:
-                    return self._last_completed_package_path
-                if self._last_failure is not None:
-                    raise self._last_failure
-                raise RuntimeError("no active session recording to finish")
+                raise RuntimeError(f"unknown session recording id: {session_id}")
             if session.state == "completed" and session.completed_package_path is not None:
                 return session.completed_package_path
+            if session.state not in {"active", "stopping", "detached"}:
+                raise RuntimeError(
+                    f"session recording cannot finalize from state {session.state}: {session_id}"
+                )
             session.state = "finalizing"
 
         package_finalize_start_ns = time.perf_counter_ns()
@@ -389,8 +414,9 @@ class SessionDataRecorder:
             session.state = "completed"
             session.completed_package_path = session.package_path
             with self._lock:
-                self._last_completed_package_path = session.package_path
-                self._active_session = None
+                self._sessions.pop(session.session_id, None)
+                if self._active_session_id == session.session_id:
+                    self._active_session_id = None
             shutil.rmtree(session.partial_dir)
             self._logger.info(
                 "SESSION_RECORDING package_finalized: session_id=%s point_id=%s package_path=%s frame_count=%s online_event_count=%s",
@@ -406,8 +432,9 @@ class SessionDataRecorder:
             self._stop_writer(session)
             session.state = "failed"
             with self._lock:
-                self._active_session = None
-                self._last_failure = exc
+                self._sessions.pop(session.session_id, None)
+                if self._active_session_id == session.session_id:
+                    self._active_session_id = None
             self._logger.exception(
                 "SESSION_RECORDING failed: session_id=%s point_id=%s error=%s",
                 session.session_id,
@@ -420,24 +447,22 @@ class SessionDataRecorder:
         if not self._config.enabled:
             return None
         with self._lock:
-            session = self._active_session
+            session = self._sessions.get(self._active_session_id) if self._active_session_id is not None else None
         if session is None or session.state not in {"active", "stopping"}:
             return None
         return session
 
-    def _require_active_session(self) -> RecordingSession:
-        session = self._optional_active_session()
+    def _require_session(self, session_id: str, allowed_states: set[str]) -> RecordingSession:
+        with self._lock:
+            session = self._sessions.get(str(session_id))
+            state = session.state if session is not None else None
         if session is None:
-            raise RuntimeError("no active session recording")
-        return session
-
-    def _require_active_or_stopping_session(self) -> RecordingSession:
-        session = self._optional_active_session()
-        if session is None:
-            with self._lock:
-                session = self._active_session
-            if session is None or session.state != "finalizing":
-                raise RuntimeError("no active session recording")
+            raise RuntimeError(f"unknown session recording id: {session_id}")
+        if state not in allowed_states:
+            allowed = ", ".join(sorted(allowed_states))
+            raise RuntimeError(
+                f"session recording state {state} is not one of [{allowed}]: {session_id}"
+            )
         return session
 
     def _enqueue(self, session: RecordingSession, op: Callable[[], None]) -> None:

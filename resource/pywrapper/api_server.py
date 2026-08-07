@@ -175,6 +175,7 @@ class OfflineSession:
     received_perf_counter_ns: Optional[int] = None
     before_captured_event: threading.Event = field(default_factory=threading.Event)
     capture_done_event: threading.Event = field(default_factory=threading.Event)
+    handoff_ready_event: threading.Event = field(default_factory=threading.Event)
     finished_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
     initial_before_record: Optional[OfflineFrameRecord] = None
@@ -224,6 +225,8 @@ class OfflineSession:
     finalization_stage: Optional[str] = None
     finalization_stage_started_ns: Optional[int] = None
     finalization_started_ns: Optional[int] = None
+    recording_session_id: Optional[str] = None
+    recording_stop_requested: bool = False
 
 
 class MSG(ctypes.Structure):
@@ -1787,6 +1790,9 @@ class OfflineSessionManager:
         self._logger = logger or logging.getLogger("pywrapper_api_server")
         self._debug_saver = debug_saver or DebugFrameSaver()
         self._session_recorder = session_recorder
+        self._session_recording_enabled = bool(
+            self._session_recorder is not None and self._session_recorder.config.enabled
+        )
         self._ultrasound_depth_cache = ultrasound_depth_cache or UltrasoundDepthCache(
             config.provider_ultrasound_depth_cache_path,
             self._logger,
@@ -1800,6 +1806,7 @@ class OfflineSessionManager:
         else:
             self._frame_fetcher = frame_fetcher
         self._lock = threading.Lock()
+        self._closed = False
         self._cache_lock = threading.Lock()
         self._active_session: Optional[OfflineSession] = None
         self._orphans: list[OfflineSession] = []
@@ -1952,7 +1959,74 @@ class OfflineSessionManager:
             return point_id
 
     def _prune_orphans_locked(self) -> None:
-        self._orphans = [s for s in self._orphans if s.thread is not None and s.thread.is_alive()][-8:]
+        self._orphans = [s for s in self._orphans if s.thread is not None and s.thread.is_alive()]
+
+    def close(self, timeout_seconds: Optional[float] = None) -> None:
+        timeout_s = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else max(1.0, min(float(self._config.stop_wait_timeout_seconds), 120.0))
+        )
+        if timeout_s <= 0:
+            raise ValueError("OFFLINE shutdown drain timeout must be greater than zero")
+
+        with self._lock:
+            self._closed = True
+            self._prune_orphans_locked()
+            active = self._active_session
+            if active is not None:
+                if not active.finished_event.is_set():
+                    self._request_session_stop_locked(active)
+                self._append_orphan_locked(active)
+            sessions = []
+            for session in self._orphans:
+                if not any(existing is session for existing in sessions):
+                    sessions.append(session)
+
+        deadline = time.monotonic() + timeout_s
+        timed_out = []
+        for session in sessions:
+            remaining_s = max(0.0, deadline - time.monotonic())
+            if not session.finished_event.wait(timeout=remaining_s):
+                timed_out.append(
+                    {
+                        "point_id": session.point_id,
+                        "last_stage": session.finalization_stage,
+                    }
+                )
+
+        with self._lock:
+            if self._active_session is not None and self._active_session.finished_event.is_set():
+                self._active_session = None
+            self._prune_orphans_locked()
+
+        failures = []
+        for session in sessions:
+            response = session.response if isinstance(session.response, dict) else {}
+            if session.finished_event.is_set() and response.get("success") is False:
+                failures.append(
+                    {
+                        "point_id": session.point_id,
+                        "info": response.get("info"),
+                        "error": response.get("error"),
+                    }
+                )
+
+        if timed_out or failures:
+            details = {"timed_out": timed_out, "failures": failures}
+            self._offline_diag(
+                "shutdown_drain_failed",
+                level="error",
+                timeout_s=round(float(timeout_s), 6),
+                **details,
+            )
+            raise RuntimeError(f"OFFLINE shutdown drain failed: {safe_json_text(details)}")
+
+        self._offline_diag(
+            "shutdown_drain_completed",
+            timeout_s=round(float(timeout_s), 6),
+            session_count=len(sessions),
+        )
 
     def _get_cached_roi_state(self):
         with self._cache_lock:
@@ -1984,7 +2058,10 @@ class OfflineSessionManager:
         received_ts = time.time()
         received_perf_counter_ns = time.perf_counter_ns()
 
+        stop_session = None
         with self._lock:
+            if self._closed:
+                return {"success": False, "info": "offline_manager_closed", "point_id": point_id}
             self._prune_orphans_locked()
             active = self._active_session
             point_key = self._normalize_point_key(point_id)
@@ -2007,38 +2084,53 @@ class OfflineSessionManager:
             self._offline_diag("handle", **handle_fields)
             if action == "stop":
                 self._offline_point_req_count[point_key] = accepted + 1
-                return self._stop_locked(active)
-            if active is not None:
-                active.stop_event.set()
+                self._request_session_stop_locked(active)
+                stop_session = active
+            elif active is not None:
+                self._request_session_stop_locked(active)
                 self._offline_diag(
                     "switch_wait_begin",
                     point_id=point_id,
                     previous_point_id=active.point_id,
                     capture_source="image_matrix",
                     capture_done_before_wait=bool(active.capture_done_event.is_set()),
+                    handoff_ready_before_wait=bool(active.handoff_ready_event.is_set()),
                     thread_alive_before_wait=bool(active.thread is not None and active.thread.is_alive()),
                 )
-                try:
-                    active.capture_done_event.wait(timeout=2)
-                except Exception:
-                    pass
-                try:
-                    if active.thread is not None and active.thread.is_alive() and (not active.capture_done_event.is_set()):
-                        active.thread.join(timeout=5)
-                except Exception:
-                    pass
+                handoff_timeout_s = max(1.0, min(float(self._config.stop_wait_timeout_seconds), 120.0))
+                handoff_ready = bool(active.handoff_ready_event.wait(timeout=handoff_timeout_s))
                 self._offline_diag(
                     "switch_wait_completed",
                     point_id=point_id,
                     previous_point_id=active.point_id,
                     capture_source="image_matrix",
                     capture_done_after_wait=bool(active.capture_done_event.is_set()),
+                    handoff_ready_after_wait=bool(active.handoff_ready_event.is_set()),
+                    handoff_timeout_s=round(float(handoff_timeout_s), 6),
                     thread_alive_after_wait=bool(active.thread is not None and active.thread.is_alive()),
                 )
-                self._orphans.append(active)
+                if not handoff_ready:
+                    return {
+                        "success": False,
+                        "info": "offline_previous_handoff_timeout",
+                        "point_id": point_id,
+                        "previous_point_id": active.point_id,
+                    }
+                self._append_orphan_locked(active)
                 self._active_session = None
-            self._offline_point_req_count[point_key] = accepted + 1
-            if wait_before_capture:
+            if action == "start":
+                self._offline_point_req_count[point_key] = accepted + 1
+                if wait_before_capture:
+                    return self._start_locked(
+                        point_id,
+                        duration_s,
+                        is_save,
+                        received_wall_time,
+                        received_ts,
+                        received_perf_counter_ns,
+                        save_test_data_frames=save_test_data_frames,
+                        wait_before_capture=True,
+                    )
                 return self._start_locked(
                     point_id,
                     duration_s,
@@ -2047,17 +2139,8 @@ class OfflineSessionManager:
                     received_ts,
                     received_perf_counter_ns,
                     save_test_data_frames=save_test_data_frames,
-                    wait_before_capture=True,
                 )
-            return self._start_locked(
-                point_id,
-                duration_s,
-                is_save,
-                received_wall_time,
-                received_ts,
-                received_perf_counter_ns,
-                save_test_data_frames=save_test_data_frames,
-            )
+        return self._wait_for_stop(stop_session)
 
     def _start_locked(
         self,
@@ -2092,12 +2175,15 @@ class OfflineSessionManager:
         )
         if session.save_test_data_frames:
             self._prepare_test_data_frame_dir(session)
-        if self._session_recorder is not None:
-            self._session_recorder.start_session(
+        if self._session_recording_enabled:
+            recording_session_id = self._session_recorder.start_session(
                 point_id=point_id,
                 meta=dict(session.meta),
                 server={"component": "pywrapper_api_server"},
             )
+            if not recording_session_id:
+                raise RuntimeError("session recorder did not return a session_id")
+            session.recording_session_id = str(recording_session_id)
         session.thread = threading.Thread(target=self._run_session, args=(session,), daemon=True, name=f"pywrapper-offline-{point_id}")
         self._active_session = session
         self._offline_diag(
@@ -2112,6 +2198,7 @@ class OfflineSessionManager:
             test_data_dir=session.test_data_dir,
             peak_detect_enabled=bool(self._config.peak_detect_enabled),
             offline_peak_enabled=bool(self._config.offline_peak_enabled),
+            session_recording_enabled=bool(self._session_recording_enabled),
         )
         session.thread.start()
         self._offline_diag(
@@ -2199,10 +2286,22 @@ class OfflineSessionManager:
             frame_path=str(frame_path),
         )
 
-    def _stop_locked(self, session: OfflineSession) -> dict:
+    def _request_session_stop_locked(self, session: OfflineSession) -> None:
         session.stop_event.set()
-        if self._session_recorder is not None:
-            self._session_recorder.mark_offline_stop_requested(point_id=session.point_id)
+        if self._session_recording_enabled and not session.recording_stop_requested:
+            if not session.recording_session_id:
+                raise RuntimeError("OFFLINE session recording_session_id is required before stop")
+            self._session_recorder.mark_offline_stop_requested(
+                session_id=session.recording_session_id,
+                point_id=session.point_id,
+            )
+            session.recording_stop_requested = True
+
+    def _append_orphan_locked(self, session: OfflineSession) -> None:
+        if not any(existing is session for existing in self._orphans):
+            self._orphans.append(session)
+
+    def _wait_for_stop(self, session: OfflineSession) -> dict:
         timeout_s = max(1.0, min(float(self._config.stop_wait_timeout_seconds), 120.0))
         self._offline_diag(
             "stop_wait_begin",
@@ -2223,8 +2322,10 @@ class OfflineSessionManager:
             thread_alive=bool(session.thread is not None and session.thread.is_alive()),
             **self._finalization_progress_fields(session),
         )
-        self._active_session = None
-        self._orphans.append(session)
+        with self._lock:
+            if self._active_session is session:
+                self._active_session = None
+            self._append_orphan_locked(session)
         response = dict(session.response or {})
         if response.get("success") is False:
             return response
@@ -2268,7 +2369,9 @@ class OfflineSessionManager:
 
     def _append_frame_buffer(self, session: OfflineSession, frame: np.ndarray, seq: int, ts: float, frame_index: int, tag: str, roi1_gray: float) -> None:
         session.frame_buffer.append(OfflineFrameRecord(np.array(frame, copy=True), int(seq), float(ts), int(frame_index), str(tag), float(roi1_gray)))
-        if self._session_recorder is not None:
+        if self._session_recording_enabled:
+            if not session.recording_session_id:
+                raise RuntimeError("OFFLINE session recording_session_id is required before recording frames")
             self._session_recorder.record_frame(
                 frame,
                 frame_seq=int(seq),
@@ -2277,6 +2380,7 @@ class OfflineSessionManager:
                 source="offline_capture",
                 tag=str(tag),
                 metrics={"roi1_mean": float(roi1_gray)},
+                session_id=session.recording_session_id,
             )
         limit = max(1, int(self._config.offline_tmp_max_buffer_frames))
         if len(session.frame_buffer) > limit:
@@ -3152,14 +3256,21 @@ class OfflineSessionManager:
         )
 
     def _finalize_session_recording(self, session: OfflineSession, reason: str) -> bool:
-        if self._session_recorder is None:
+        if not self._session_recording_enabled:
             return True
         try:
+            if not session.recording_session_id:
+                raise RuntimeError("OFFLINE session recording_session_id is required before finalization")
             response = session.response if isinstance(session.response, dict) else {}
             result_summary = dict(response)
             result_summary["recording_finalize_reason"] = reason
-            self._session_recorder.record_offline_result(result_summary)
-            package_path = self._session_recorder.finish_session()
+            self._session_recorder.record_offline_result(
+                result_summary,
+                session_id=session.recording_session_id,
+            )
+            package_path = self._session_recorder.finish_session(
+                session_id=session.recording_session_id,
+            )
             self._offline_diag(
                 "session_recording_finalized",
                 point_id=session.point_id,
@@ -3177,6 +3288,35 @@ class OfflineSessionManager:
             }
             self._log_final_response_ready(session)
             self._mark_finished_event_set(session, "session_recording_failed")
+            return False
+
+    def _mark_handoff_ready(self, session: OfflineSession, reason: str) -> bool:
+        if session.handoff_ready_event.is_set():
+            return True
+        try:
+            if self._session_recording_enabled:
+                if not session.recording_session_id:
+                    raise RuntimeError("OFFLINE session recording_session_id is required before handoff")
+                self._session_recorder.detach_session(session_id=session.recording_session_id)
+            self._offline_diag(
+                "handoff_ready",
+                point_id=session.point_id,
+                reason=reason,
+                recording_session_id=session.recording_session_id,
+                shared_outputs_completed=True,
+            )
+            session.handoff_ready_event.set()
+            return True
+        except Exception as exc:
+            self._logger.exception("OFFLINE session handoff failed: point_id=%s", session.point_id)
+            session.response = {
+                "success": False,
+                "info": "session_recording_handoff_failed",
+                "point_id": session.point_id,
+                "error": str(exc),
+            }
+            self._log_final_response_ready(session)
+            self._mark_finished_event_set(session, "session_recording_handoff_failed")
             return False
 
     def _attach_treatment_result_fields(self, session: OfflineSession) -> None:
@@ -3408,6 +3548,8 @@ class OfflineSessionManager:
                     test_data_dir=session.test_data_dir,
                     test_data_frame_count=int(session.test_data_frame_count),
                 )
+                if not self._mark_handoff_ready(session, "test_data_frames_completed"):
+                    return
                 if not self._finalize_session_recording(session, "test_data_frames_completed"):
                     return
                 self._log_final_response_ready(session)
@@ -3548,11 +3690,16 @@ class OfflineSessionManager:
                     "point_id": session.point_id,
                 }
                 self._attach_treatment_result_fields(session)
+                if not self._mark_handoff_ready(session, "final_output_save_failed"):
+                    return
                 if not self._finalize_session_recording(session, "final_output_save_failed"):
                     return
                 self._log_final_response_ready(session)
                 self._mark_finished_event_set(session, "final_output_save_failed")
                 return
+            if not self._mark_handoff_ready(session, "shared_outputs_completed"):
+                return
+
             save_debug_start = self._finalization_stage_begin(
                 session,
                 "save_debug_outputs",
@@ -4169,7 +4316,10 @@ def main(argv=None) -> int:
     try:
         ApiServer(provider, logger, offline_manager, session_recorder=session_recorder).serve_forever(args.host, args.port)
     finally:
-        provider.close()
+        try:
+            offline_manager.close()
+        finally:
+            provider.close()
     return 0
 
 

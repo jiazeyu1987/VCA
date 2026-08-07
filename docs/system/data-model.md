@@ -190,6 +190,7 @@ Recorder session states:
 - `inactive`: no active OFFLINE recording.
 - `active`: OFFLINE start accepted and frames/events are being recorded.
 - `stopping`: matching OFFLINE stop request accepted.
+- `detached`: shared treatment outputs are complete; the session keeps its own queue/files while a later session may become active.
 - `finalizing`: OFFLINE result and package files are being written.
 - `completed`: zip package was created and verified.
 - `failed`: recording encountered an explicit error.
@@ -197,14 +198,19 @@ Recorder session states:
 Allowed transitions:
 
 ```text
-inactive -> active -> stopping -> finalizing -> completed
+inactive -> active -> stopping -> detached -> finalizing -> completed
+inactive -> active -> detached -> finalizing -> completed
 inactive -> active -> failed
 active -> stopping -> failed
+stopping -> detached -> failed
+detached -> finalizing -> failed
 stopping -> finalizing -> failed
 finalizing -> failed
 completed -> inactive
 failed -> inactive after error is surfaced
 ```
+
+The recorder registry is keyed by `session_id`. Only one entry is capture-active for ONLINE attribution, while detached/finalizing entries may coexist and finish in any order.
 
 ## Migration Notes
 

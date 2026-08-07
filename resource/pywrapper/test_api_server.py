@@ -30,10 +30,14 @@ class FakeSessionRecorder:
         self.calls = []
         self.active = active
         self.package_path = Path(package_path)
+        self.active_session_id = "session-existing" if active else None
+        self.config = session_recorder.SessionRecorderConfig(enabled=True)
 
     def start_session(self, **kwargs):
         self.active = True
+        self.active_session_id = f"session-{kwargs['point_id']}"
         self.calls.append(("start_session", kwargs))
+        return self.active_session_id
 
     def record_frame(self, image, **kwargs):
         self.calls.append(("record_frame", kwargs))
@@ -44,12 +48,20 @@ class FakeSessionRecorder:
     def record_online_request(self, **kwargs):
         self.calls.append(("record_online_request", kwargs))
 
-    def record_offline_result(self, result_summary):
-        self.calls.append(("record_offline_result", result_summary))
+    def record_offline_result(self, result_summary, *, session_id):
+        self.calls.append(("record_offline_result", {"session_id": session_id, "result": result_summary}))
 
-    def finish_session(self):
-        self.calls.append(("finish_session", {}))
-        self.active = False
+    def detach_session(self, *, session_id):
+        self.calls.append(("detach_session", {"session_id": session_id}))
+        if self.active_session_id == session_id:
+            self.active = False
+            self.active_session_id = None
+
+    def finish_session(self, *, session_id):
+        self.calls.append(("finish_session", {"session_id": session_id}))
+        if self.active_session_id == session_id:
+            self.active = False
+            self.active_session_id = None
         return self.package_path
 
     def is_active(self):
@@ -1792,12 +1804,12 @@ class ApiServerTests(unittest.TestCase):
             self.assertIn("OFFLINE diag finished_event_set:", log_text)
             self.assertIn('"response_info": "error_in_detect"', log_text)
 
-    def test_offline_switch_waits_for_previous_capture_done_before_new_start(self):
+    def test_offline_switch_waits_for_previous_handoff_before_new_start(self):
         manager = api_server.OfflineSessionManager(
             provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
             frame_fetcher=self.SequenceFrameSource([]),
             config=api_server.OfflineConfig.default(),
-            logger=self.make_null_logger("test_offline_switch_waits_for_previous_capture_done_before_new_start"),
+            logger=self.make_null_logger("test_offline_switch_waits_for_previous_handoff_before_new_start"),
         )
         probe = self.WaitProbe()
         previous = api_server.OfflineSession(
@@ -1807,6 +1819,7 @@ class ApiServerTests(unittest.TestCase):
             stop_event=threading.Event(),
         )
         previous.capture_done_event = probe
+        previous.handoff_ready_event = probe
         previous.finished_event = threading.Event()
         previous.thread = self.FakeThread()
         manager._active_session = previous
@@ -1836,7 +1849,7 @@ class ApiServerTests(unittest.TestCase):
 
         self.assertEqual(result, {"success": True, "info": "offline_started", "point_id": 222})
         self.assertTrue(previous.stop_event.is_set())
-        self.assertEqual(probe.calls, [2])
+        self.assertEqual(probe.calls, [manager._config.stop_wait_timeout_seconds])
         self.assertEqual(
             called,
             {
@@ -1849,6 +1862,90 @@ class ApiServerTests(unittest.TestCase):
                 "received_perf_counter_ns_type": "int",
             },
         )
+
+    def test_offline_next_treatment_captures_before_frame_while_previous_finalization_is_blocked(self):
+        frames = [
+            api_server.FrameSnapshot(np.full((32, 32, 3), 7, dtype=np.uint8), seq=41, ts=123.456),
+            api_server.FrameSnapshot(np.full((32, 32, 3), 8, dtype=np.uint8), seq=42, ts=123.556),
+            api_server.FrameSnapshot(np.full((32, 32, 3), 9, dtype=np.uint8), seq=43, ts=123.656),
+        ]
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {"focus_point": "PointF(10, 10)", "depth": "1000"},
+            frame_fetcher=self.SequenceFrameSource(frames),
+            config=api_server.OfflineConfig.default(),
+            logger=self.make_null_logger(
+                "test_offline_next_treatment_captures_before_frame_while_previous_finalization_is_blocked"
+            ),
+        )
+        shared_outputs_entered = threading.Event()
+        release_shared_outputs = threading.Event()
+        finalization_entered = threading.Event()
+        release_finalization = threading.Event()
+        stop_done = threading.Event()
+        next_done = threading.Event()
+        results = {}
+
+        def controlled_save_final_outputs(session):
+            if session.point_id == 333:
+                shared_outputs_entered.set()
+                release_shared_outputs.wait(timeout=2.0)
+            return {}
+
+        def controlled_save_debug_outputs(session):
+            if session.point_id == 333:
+                finalization_entered.set()
+                release_finalization.wait(timeout=2.0)
+
+        manager._save_final_outputs = controlled_save_final_outputs
+        manager._save_debug_outputs = controlled_save_debug_outputs
+
+        first = manager.handle(
+            '{"point_id": 333, "time_out": 5, "is_save": false, "wait_before_capture": true}'
+        )
+        self.assertEqual(first["info"], "offline_before_captured")
+
+        def stop_first():
+            results["stop"] = manager.handle(
+                '{"point_id": 333, "time_out": 5, "is_save": false}'
+            )
+            stop_done.set()
+
+        def start_next():
+            results["next"] = manager.handle(
+                '{"point_id": 334, "time_out": 5, "is_save": false, "wait_before_capture": true}'
+            )
+            next_done.set()
+
+        stop_thread = threading.Thread(target=stop_first)
+        next_thread = threading.Thread(target=start_next)
+        stop_thread.start()
+        self.assertTrue(shared_outputs_entered.wait(timeout=1.0))
+        next_thread.start()
+        try:
+            self.assertFalse(
+                next_done.wait(timeout=0.1),
+                "next treatment started before shared treatment outputs completed",
+            )
+            release_shared_outputs.set()
+            self.assertTrue(finalization_entered.wait(timeout=1.0))
+            self.assertTrue(
+                next_done.wait(timeout=0.5),
+                "next treatment waited for previous persistence finalization",
+            )
+            self.assertFalse(stop_done.is_set())
+            self.assertEqual(results["next"]["info"], "offline_before_captured")
+            self.assertEqual(results["next"]["before_frame_seq"], 43)
+        finally:
+            release_shared_outputs.set()
+            release_finalization.set()
+            stop_thread.join(timeout=2.0)
+            next_thread.join(timeout=2.0)
+
+        self.assertFalse(stop_thread.is_alive())
+        self.assertFalse(next_thread.is_alive())
+        self.assertIsNotNone(manager._active_session)
+        self.assertEqual(manager._active_session.point_id, 334)
+        manager.handle('{"point_id": 334, "time_out": 5, "is_save": false}')
 
     def test_offline_start_wait_before_capture_returns_after_first_before_frame(self):
         frame = api_server.FrameSnapshot(
@@ -1890,10 +1987,11 @@ class ApiServerTests(unittest.TestCase):
             stop_event=threading.Event(),
         )
         previous.capture_done_event = probe
+        previous.handoff_ready_event = probe
         previous.finished_event = threading.Event()
         previous.thread = self.FakeThread()
         manager._active_session = previous
-        manager._start_locked = lambda point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns: {"success": True, "info": "offline_started", "point_id": point_id}
+        manager._start_locked = lambda point_id, duration_s, is_save, received_wall_time, received_ts, received_perf_counter_ns, **kwargs: {"success": True, "info": "offline_started", "point_id": point_id}
 
         manager.handle('{"point_id": 222, "time_out": 5, "is_save": false}')
 
@@ -1926,7 +2024,8 @@ class ApiServerTests(unittest.TestCase):
         session.finalization_stage_started_ns = time.perf_counter_ns() - 150_000_000
         session.finalization_started_ns = time.perf_counter_ns() - 300_000_000
 
-        result = manager._stop_locked(session)
+        manager._request_session_stop_locked(session)
+        result = manager._wait_for_stop(session)
 
         self.assertEqual(result["info"], "offline_stop_timeout")
         log_text = stream.getvalue()
@@ -1934,6 +2033,89 @@ class ApiServerTests(unittest.TestCase):
         self.assertIn('"last_stage": "save_debug_outputs"', log_text)
         self.assertIn('"last_stage_elapsed_ms":', log_text)
         self.assertIn('"finalization_elapsed_ms":', log_text)
+
+    def test_offline_close_drains_active_and_detached_sessions(self):
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {},
+            frame_fetcher=self.SequenceFrameSource([]),
+            config=api_server.OfflineConfig.default(),
+            logger=self.make_null_logger("test_offline_close_drains_active_and_detached_sessions"),
+        )
+        detached = api_server.OfflineSession(
+            point_id=111,
+            duration_s=10.0,
+            is_save=False,
+            stop_event=threading.Event(),
+        )
+        active = api_server.OfflineSession(
+            point_id=222,
+            duration_s=10.0,
+            is_save=False,
+            stop_event=threading.Event(),
+        )
+
+        def finish_detached():
+            time.sleep(0.05)
+            detached.response = {"success": True, "info": "offline_stop_completed", "point_id": 111}
+            detached.finished_event.set()
+
+        def finish_active():
+            active.stop_event.wait(timeout=1.0)
+            active.response = {"success": True, "info": "offline_stop_completed", "point_id": 222}
+            active.finished_event.set()
+
+        detached.thread = threading.Thread(target=finish_detached)
+        active.thread = threading.Thread(target=finish_active)
+        manager._orphans.append(detached)
+        manager._active_session = active
+        detached.thread.start()
+        active.thread.start()
+
+        manager.close(timeout_seconds=1.0)
+
+        detached.thread.join(timeout=1.0)
+        active.thread.join(timeout=1.0)
+        self.assertTrue(detached.finished_event.is_set())
+        self.assertTrue(active.finished_event.is_set())
+        self.assertTrue(active.stop_event.is_set())
+        self.assertIsNone(manager._active_session)
+
+    def test_offline_close_reports_background_persistence_failure(self):
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {},
+            frame_fetcher=self.SequenceFrameSource([]),
+            config=api_server.OfflineConfig.default(),
+            logger=self.make_null_logger("test_offline_close_reports_background_persistence_failure"),
+        )
+        failed = api_server.OfflineSession(
+            point_id=111,
+            duration_s=10.0,
+            is_save=False,
+            stop_event=threading.Event(),
+        )
+        failed.thread = self.FakeThread()
+        failed.response = {"success": False, "info": "session_recording_failed", "point_id": 111}
+        failed.finished_event.set()
+        manager._active_session = failed
+
+        with self.assertRaisesRegex(RuntimeError, "session_recording_failed"):
+            manager.close(timeout_seconds=0.1)
+
+    def test_offline_close_rejects_new_treatment_starts(self):
+        manager = api_server.OfflineSessionManager(
+            provider_fetcher=lambda: {},
+            frame_fetcher=self.SequenceFrameSource([]),
+            config=api_server.OfflineConfig.default(),
+            logger=self.make_null_logger("test_offline_close_rejects_new_treatment_starts"),
+        )
+
+        manager.close(timeout_seconds=0.1)
+        result = manager.handle('{"point_id": 123, "time_out": 5, "is_save": false}')
+
+        self.assertEqual(
+            result,
+            {"success": False, "info": "offline_manager_closed", "point_id": 123},
+        )
 
     def test_offline_debug_save_flushes_buffered_frames_and_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2101,6 +2283,55 @@ class ApiServerTests(unittest.TestCase):
                 self.assertIn("offline_stop_requested", event_types)
                 self.assertIn("offline_result", event_types)
                 self.assertIn("offline_end", event_types)
+
+    def test_offline_manager_succeeds_without_package_when_session_recording_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = self.SequenceFrameSource(
+                [
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 10, dtype=np.uint8), 1, 1.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 11, dtype=np.uint8), 2, 2.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 60, dtype=np.uint8), 3, 3.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 20, dtype=np.uint8), 4, 4.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 5, 5.0),
+                    api_server.FrameSnapshot(np.full((40, 40, 3), 12, dtype=np.uint8), 6, 6.0),
+                ]
+            )
+            recorder = session_recorder.SessionDataRecorder(
+                session_recorder.SessionRecorderConfig(enabled=False, output_dir=tmp),
+                logger=self.make_null_logger(
+                    "test_offline_manager_succeeds_without_package_when_session_recording_disabled"
+                ),
+            )
+            manager = api_server.OfflineSessionManager(
+                provider_fetcher=lambda: {"focus_point": "PointF(20, 20)", "depth": "1000"},
+                frame_fetcher=frames,
+                config=api_server.OfflineConfig(
+                    peak_detect_enabled=True,
+                    offline_peak_enabled=True,
+                    offline_peak_threshold=25.0,
+                    offline_peak_after_delay_frames=1,
+                    offline_peak_end_diff_threshold=7.0,
+                    roi2_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    roi3_extension_params={"left": 3, "right": 3, "top": 3, "bottom": 3},
+                    difference_threshold=5.0,
+                    stop_wait_timeout_seconds=2.0,
+                ),
+                logger=self.make_null_logger(
+                    "test_offline_manager_succeeds_without_package_when_session_recording_disabled_manager"
+                ),
+                session_recorder=recorder,
+            )
+
+            start = manager.handle(
+                '{"point_id": 123, "time_out": 10, "is_save": false, "wait_before_capture": true}'
+            )
+            time.sleep(0.12)
+            stop = manager.handle('{"point_id": 123, "time_out": 10, "is_save": false}')
+
+            self.assertEqual(start["info"], "offline_before_captured")
+            self.assertEqual(stop["info"], "offline_stop_completed", stop)
+            self.assertFalse(recorder.is_active())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_offline_debug_final_before_after_names_include_source_frame_name(self):
         with tempfile.TemporaryDirectory() as tmp:
