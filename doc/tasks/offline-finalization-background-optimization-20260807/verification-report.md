@@ -31,3 +31,11 @@ Task-owned implementation and regression verification passed. Independent releas
 - Independent review round 2: PASS, no blocking issues or required changes.
 - Backend/API, bug-regression, and performance evidence validators: PASS before intermediate evidence cleanup.
 - Task cleanup preview/apply: PASS; retained this report, `task.md`, `execution-log.md`, production code, system design updates, and formal tests.
+- Implementation commit `b98dfbd`: pushed successfully to the task branch.
+
+## Release Blocker
+
+- Required runtime `D:\miniconda3\envs\houyang\python.exe` is absent.
+- The release scripts intentionally require that runtime and its conda DLL set; system Python is not an approved substitute.
+- `publish_release.bat` was not invoked because `tools\publish_release.ps1` calls `closeserver.bat` before the package script checks the missing runtime.
+- Impact: source optimization is implemented, verified, reviewed, committed, and pushed, but the OCRSERVER release artifact and `VA` release repository were not updated.

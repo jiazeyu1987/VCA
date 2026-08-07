@@ -19,3 +19,5 @@
 - GREEN: `python -B -m unittest test_server_scripts test_offline_screenshot_probe` from `resource\pywrapper` -> PASS (28 tests).
 - GREEN: `git diff --check -- <task-owned source, tests, and system docs>` -> PASS with only expected LF-to-CRLF warnings.
 - CLOSEOUT: `task_closeout.py --mode preview` matched the intended task scope; apply removed only the task review run and intermediate evidence while retaining task, execution, verification, production, and formal test files.
+- PUSH: implementation commit `b98dfbd` -> PASS to `origin/codex/offline-finalization-background-optimization`; the repository-specific GitHub proxy override was cleared for this command only.
+- BLOCKED: release preflight `Test-Path D:\miniconda3\envs\houyang\python.exe` -> `False`. `docs/environments/ci-cd-evidence.md` requires this exact runtime and prohibits fallback; `publish_release.bat` was not invoked because it would stop the server before packaging fails.

@@ -22,11 +22,12 @@ Remove previous-session debug image and session-package finalization from the ne
 
 ## Current Status
 
-ready_for_closeout
+blocked
 
 ## Blockers
 
-- None at task start.
+- Release publish is blocked: required runtime `D:\miniconda3\envs\houyang\python.exe` is missing. The repository explicitly forbids substituting another Python runtime, and `publish_release.bat` would stop the service before the package script reports this failure.
+- Real-device timing remains blocked until the new hardware is connected.
 
 ## Completed Work
 
@@ -49,6 +50,8 @@ ready_for_closeout
 - Independent review round 2 passed.
 - Final no-bytecode regression runs passed: 129 API/recorder tests and 28 server/probe tests.
 - Task closeout cleanup preview and apply passed with no blocked or ambiguous paths.
+- Implementation commit `b98dfbd` was pushed to `origin/codex/offline-finalization-background-optimization`.
+- Release preflight stopped before `publish_release.bat` because the required `houyang` runtime is missing; no service process or release repository was modified.
 
 ## Cleanup Candidates
 
